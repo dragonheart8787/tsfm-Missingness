@@ -1,0 +1,174 @@
+# =============================================================================
+# Chronos-2 Missingness Geometry Pilot — single source of truth for constants.
+#
+# Every numeric constant used by the pilot lives here. Nothing in the code
+# hardcodes a design constant; modules read this file. Values marked
+# PREREGISTERED must not be changed without a corresponding preregistration
+# amendment, because they define what is being tested.
+# =============================================================================
+
+run:
+  # Short human label; the machine run_id is derived at runtime and recorded in
+  # every output row (see runner/run_pilot.py).
+  name: "chronos2-missingness-pilot-v1"
+  results_dir: "results"
+  # Checkpoint cadence: the runner writes durable state after every completed
+  # origin so an interrupted GPU run resumes without recomputation.
+  checkpoint_every_origins: 1
+
+dataset:
+  name: "ETTh1"
+  target_column: "OT"
+  # Canonical ETDataset release (zhouhaoyi/ETDataset), ETT-small/ETTh1.csv.
+  source_url: "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh1.csv"
+  local_path: "data/raw/ETTh1.csv"
+  metadata_path: "data/raw/ETTh1_validation.json"
+  # PREREGISTERED: the canonical ETTh1 length. Asserted, not merely logged.
+  expected_rows: 17420
+  expected_freq: "1h"
+  # sha256 of the canonical file; filled in by data/fetch_etth1.py on first
+  # fetch and asserted on every subsequent load.
+  expected_sha256: "f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066"
+
+design:
+  # PREREGISTERED pilot geometry.
+  context_length: 320        # L
+  horizon: 96                # H
+  stride: 96
+  # PREREGISTERED: derived from (rows, L, H, stride) and asserted at runtime.
+  expected_origins: 178
+  expected_conditions_per_origin: 17
+  expected_total_forecasts: 3026
+
+model:
+  hf_model_id: "amazon/chronos-2"
+  # PREREGISTERED-BY-PIN: the exact commit hash of the Hugging Face repo that
+  # was loaded. `null` means "not yet pinned" and the runner REFUSES to run.
+  # Populate via: python scripts/verify_model_contract.py --write-revision
+  revision: null
+  device: "auto"             # "auto" | "cuda" | "cpu"
+  dtype: "float32"           # float32 unless the runtime genuinely forces otherwise
+  # Explicit median. We select the q=0.5 column of the model's own trained
+  # quantile grid; we never accept an API convenience "point forecast".
+  quantile_level: 0.5
+  # Isolation: Chronos-2's `cross_learning` shares information across all tasks
+  # in a call. It must be False, and we additionally submit one origin per call.
+  cross_learning: false
+  forecasts_per_call: 1
+  # PREREGISTERED ASSUMPTION about the model's patch grid. All block positions
+  # below are aligned to this. The runner reads the real value from the loaded
+  # checkpoint's chronos_config and HARD-FAILS if it differs, rather than
+  # silently adjusting the grid. See scripts/verify_model_contract.py.
+  expected_patch_size: 16
+  expected_patch_stride: 16
+  # Verified from chronos-forecasting source: Chronos2Model builds its
+  # context_mask as `~torch.isnan(context)`, so float NaN in the context array
+  # is the model's officially supported representation of a missing history
+  # observation. Timestamps are never dropped.
+  missing_value_convention: "nan_passthrough"
+
+masks:
+  # PREREGISTERED exact missing counts (never Bernoulli).
+  rates:
+    - rate: 0.20
+      missing_count: 64
+      block_length: 64
+      block_distances: [0, 64, 128, 192, 256]
+    - rate: 0.40
+      missing_count: 128
+      block_length: 128
+      block_distances: [0, 48, 96, 144, 192]
+  point_random_seeds: [42, 123, 2026]
+  # Explicit, documented, process-stable RNG construction. Python's builtin
+  # hash() is NOT used anywhere (it is salted per process for str).
+  # seed_int = int.from_bytes(blake2b(payload, digest_size=8), "big")
+  # payload  = f"{namespace}|{base_seed}|{origin_id}|{rate_ppm}".encode("utf-8")
+  rng:
+    construction: "blake2b64"
+    namespace: "tsfm-missingness/point-random/v1"
+    digest_size_bytes: 8
+
+metrics:
+  # MASE is secondary and explicitly excluded from the decision rule.
+  mase_enabled: true
+  mase_seasonal_period: 24        # hourly data
+  mase_min_denominator: 1.0e-8    # zero-denominator guard
+
+contrasts:
+  # PREREGISTERED: exactly these four feed the decision rule.
+  - id: "C1_loc_20"
+    family: "location"
+    label: "20%: boundary block (d=0) - far block (d=256)"
+    kind: "causal_contrast_within_pattern"
+    rate: 0.20
+    minuend: {pattern: "block", distance: 0}
+    subtrahend: {pattern: "block", distance: 256}
+  - id: "C2_loc_40"
+    family: "location"
+    label: "40%: boundary block (d=0) - far block (d=192)"
+    kind: "causal_contrast_within_pattern"
+    rate: 0.40
+    minuend: {pattern: "block", distance: 0}
+    subtrahend: {pattern: "block", distance: 192}
+  - id: "C3_geom_20"
+    family: "geometry"
+    label: "20%: mean random loss (within-origin seed average) - centered block (d=128)"
+    # PIPELINE COMPARISON, not a pure causal estimate of contiguity: the two
+    # arms differ in more than contiguity (position, patch occupancy, which
+    # observations are removed). Labelled as such everywhere it is reported.
+    kind: "pipeline_comparison"
+    rate: 0.20
+    minuend: {pattern: "random_seed_mean"}
+    subtrahend: {pattern: "block", distance: 128}
+  - id: "C4_geom_40"
+    family: "geometry"
+    label: "40%: mean random loss (within-origin seed average) - centered block (d=96)"
+    kind: "pipeline_comparison"
+    rate: 0.40
+    minuend: {pattern: "random_seed_mean"}
+    subtrahend: {pattern: "block", distance: 96}
+
+statistics:
+  # Moving-block bootstrap over chronologically ordered evaluation origins.
+  # Every condition is resampled JOINTLY within a block to preserve pairing.
+  bootstrap:
+    main_block_length: 8
+    sensitivity_block_lengths: [4, 12]
+    n_replicates: 5000
+    seed: 20260101
+  ci_level_corrected: 0.95      # Holm-corrected, across the four contrasts
+  ci_level_equivalence: 0.90    # uncorrected, for equivalence assessment
+  family_alpha: 0.05
+
+decision:
+  # Thresholds for the deterministic GO / PIVOT / NO-GO function. All are
+  # expressed as fractions of the mean clean MAE unless stated otherwise.
+  go:
+    min_magnitude_frac_of_clean_mae: 0.05
+  no_go:
+    equivalence_band_frac_of_clean_mae: 0.03
+    # "no stable location ordering": |Spearman(mean MAE across the 5 block
+    # positions, d)| must fall below this at either rate, or disagree in sign
+    # between rates, for the ordering to count as unstable.
+    location_ordering_abs_spearman: 0.70
+    # "random-seed sensitivity is small": aggregate-level spread across the
+    # three seeds (max-min of the across-origin mean MAE), as a fraction of
+    # mean clean MAE.
+    seed_sensitivity_frac_of_clean_mae: 0.01
+  pivot:
+    # Point estimate range across bootstrap block lengths {4,8,12}.
+    block_length_instability_frac_of_clean_mae: 0.02
+    # A handful of origins dominate: top `origin_dominance_top_frac` of origins
+    # by |paired difference| account for more than this share of the total.
+    origin_dominance_top_frac: 0.05
+    origin_dominance_share: 0.50
+    # A confounder "out-tracks" distance if its |Spearman| with the paired
+    # difference exceeds distance's by more than this margin.
+    confounder_margin_over_distance: 0.10
+    scaling_abs_spearman: 0.50
+
+diagnostics:
+  # Trailing-window missing fractions computed for these window sizes.
+  trailing_windows: [24, 48, 96]
+  # Hour-of-day composition of removed observations (seasonal phase).
+  seasonal_period: 24

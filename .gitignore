@@ -1,0 +1,13 @@
+# Raw pilot outputs — only committed summaries live in the repo
+results/
+!results/.gitkeep
+data/raw/
+report/figures/*.png
+!report/figures/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
