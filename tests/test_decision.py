@@ -33,6 +33,11 @@ def _stat(contrast_id, family, rate, mean, median, *, rejects=True, clean_mae=1.
         block_length_ci_high={4: mean + 0.01, 8: mean + 0.01, 12: mean + 0.01},
         top_origin_share=0.1,
         rho_distance=0.6,
+        # Default to a contrast in which distance GENUINELY VARIES, so the
+        # distance-relative checks are evaluable. Tests that need the real
+        # preregistered situation (distance constant across origins) pass
+        # distance_values=[] or a single repeated value explicitly.
+        distance_values=[0.0, 64.0, 128.0, 192.0, 256.0],
         rho_confounders={"removed_variance": 0.1, "n_patches_fully_missing": 0.1},
         rho_scaling=0.1,
         n_partially_missing_patches_max=0,

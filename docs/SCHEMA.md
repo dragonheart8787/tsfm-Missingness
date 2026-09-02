@@ -99,8 +99,55 @@ severity metric is fitted from them in this pilot.**
 | `contrast_results.csv` | The four contrasts: raw difference, % of mean clean MAE, Holm 95% CI, adjusted p, uncorrected 90% CI, median paired difference, fraction of origins positive, per-block-length estimates and intervals, confounder rank correlations |
 | `paired_differences.csv` | Per-origin paired difference for each contrast |
 | `bootstrap_results.csv` | Every bootstrap result at every block length (4, 8, 12) |
-| `analysis.json` | Everything above plus the decision payload |
-| `decision.json` | The GO / PIVOT / NO-GO label with its full triggering criteria |
+| `analysis.json` | Everything above plus the decision payload, `decision_rule_version`, and `distance_relative_check_status` |
+| `decision.json` | The GO / PIVOT / NO-GO label with its full triggering criteria and `decision_rule_version` |
 | `run_manifest.json` | Config snapshot, dataset validation, environment, model contract |
 | `checkpoint.json` | Resume state: the list of completed origins |
 | `run_summary.json` | Completion counts and the full-run assertions |
+
+
+---
+
+## Decision rule versioning
+
+Every decision output carries `decision_rule_version`:
+
+| Version | Behaviour |
+|---|---|
+| `v1` | Coerced an undefined `rho_distance` (NaN) to `0.0` before comparing confounder correlations against it. On the preregistered two-arm contrasts distance is constant, so this manufactured a comparison baseline that does not exist. |
+| `v2` | Distance-relative comparisons report an explicit status and are `not_evaluable` when distance is constant within the contrast. |
+
+### `distance_relative_check_status`
+
+Three PIVOT checks compare a confounder's rank correlation against distance's.
+Each publishes a per-contrast status under this key in `analysis.json` (and
+inside `decision.criteria.pivot`), alongside — not instead of — the raw
+`rho_distance` / `rho_confounders` / `rho_scaling` dumps:
+
+```json
+"confounder_out_tracks_distance_status": {
+  "C1_loc_20": {
+    "status": "not_evaluable",
+    "reason": "distance_constant_within_contrast",
+    "n_unique_finite_distance": 1,
+    "rho_distance": NaN,
+    "compared": [],
+    "exceeding": []
+  }
+}
+```
+
+| Status | Meaning | Can contribute a trigger? |
+|---|---|---|
+| `not_evaluable` | Fewer than 2 unique finite distance values in the contrast, so distance's correlation is undefined. **The question could not be asked — not the same as "no effect".** | No |
+| `invalid_input` | Distance genuinely varies but `rho_distance` is non-finite. Something upstream is wrong. | No |
+| `false` | Evaluated; no confounder exceeded distance by the margin. | No |
+| `true` | Evaluated; at least one confounder did. | Yes |
+
+### Not overwriting an earlier run's record
+
+`stats.analyze.analyse()` reads from `run_dir` and writes to `out_dir`
+(defaulting to `run_dir`). Writing over an existing `decision.json` produced
+under a *different* rule version raises `FileExistsError` unless
+`allow_overwrite=True`. For a post-hoc re-analysis, point `--out-dir` at a
+separate directory so the original run's preregistered outputs stay intact.

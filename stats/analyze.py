@@ -21,7 +21,14 @@ from metrics.aggregate import (
 )
 from stats.bootstrap import bootstrap_paired_difference, holm_correct
 from stats.contrasts import ContrastSeries, build_contrasts
-from stats.decision import ContrastStat, Decision, DecisionInputs, _spearman, decide
+from stats.decision import (
+    DECISION_RULE_VERSION,
+    ContrastStat,
+    Decision,
+    DecisionInputs,
+    _spearman,
+    decide,
+)
 
 # Confounder columns correlated against each contrast's paired differences.
 CONFOUNDER_COLUMNS = [
@@ -60,7 +67,37 @@ def _minuend_diagnostics(
     return subset.set_index("origin_id").select_dtypes(include=[np.number])
 
 
-def analyse(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+def analyse(
+    run_dir: Path,
+    config: dict[str, Any],
+    *,
+    out_dir: Path | None = None,
+    allow_overwrite: bool = False,
+) -> dict[str, Any]:
+    """Analyse a completed run. Reads from ``run_dir``, writes to ``out_dir``.
+
+    ``out_dir`` defaults to ``run_dir``. Pass a separate directory to perform a
+    POST-HOC re-analysis without disturbing the preregistered outputs of the
+    original run — those are the record of what the run actually produced under
+    the decision rule in force at the time, and must not be rewritten.
+
+    Writing over an existing ``decision.json`` that was produced by a DIFFERENT
+    decision rule version is refused unless ``allow_overwrite`` is set.
+    """
+    out_dir = run_dir if out_dir is None else out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    existing = out_dir / "decision.json"
+    if existing.exists() and not allow_overwrite:
+        previous = json.loads(existing.read_text()).get("decision_rule_version", "v1")
+        if previous != DECISION_RULE_VERSION:
+            raise FileExistsError(
+                f"{existing} was produced by decision rule {previous}, but this run uses "
+                f"{DECISION_RULE_VERSION}. Overwriting it would destroy the record of what "
+                f"the earlier rule produced. Pass an --out-dir pointing somewhere else for a "
+                f"post-hoc re-analysis, or --allow-overwrite if you genuinely mean to replace it."
+            )
+
     window_results = pd.read_csv(run_dir / "window_results.csv")
     diagnostics = pd.read_csv(run_dir / "mask_diagnostics.csv")
 
@@ -138,6 +175,16 @@ def analyse(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
             .set_index("origin_id")
             .reindex(contrast.paired_differences.index)
         )
+        # Retained so the decision function can tell "distance is constant, so
+        # its correlation is undefined" apart from "the correlation was computed
+        # and came out small". For the preregistered two-arm contrasts the
+        # subtrahend arm is a single fixed condition, so this is constant across
+        # all origins and rho_distance is legitimately NaN.
+        distance_values = (
+            distance_source["mean_missing_distance_to_boundary"].to_numpy(dtype=float).tolist()
+            if "mean_missing_distance_to_boundary" in distance_source.columns
+            else []
+        )
         rho_distance = (
             _spearman(diffs, distance_source["mean_missing_distance_to_boundary"].to_numpy())
             if "mean_missing_distance_to_boundary" in distance_source.columns
@@ -187,6 +234,7 @@ def analyse(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
                 },
                 top_origin_share=top_share,
                 rho_distance=rho_distance,
+                distance_values=distance_values,
                 rho_confounders=rho_confounders,
                 rho_scaling=rho_scaling,
                 n_partially_missing_patches_max=partial_patches,
@@ -236,6 +284,9 @@ def analyse(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
                 },
                 "top_origin_share": top_share,
                 "rho_distance": rho_distance,
+                "n_unique_finite_distance": int(
+                    len({v for v in distance_values if v == v and abs(v) != float("inf")})
+                ),
                 "rho_scaling_max_abs": rho_scaling,
                 **{f"rho_{k}": v for k, v in rho_confounders.items()},
             }
@@ -298,6 +349,18 @@ def analyse(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
         "seed_sensitivity_frac_of_clean_mae": {str(k): v for k, v in seed_sensitivity.items()},
         "contrasts": contrast_rows,
         "decision": decision.as_dict(),
+        "decision_rule_version": decision.decision_rule_version,
+        # Surfaced at the top level as well as inside decision.criteria.pivot,
+        # because "this check could not be asked" is the kind of thing a reader
+        # must not have to dig for.
+        "distance_relative_check_status": {
+            name: decision.criteria["pivot"][name]
+            for name in (
+                "confounder_out_tracks_distance_status",
+                "internal_scaling_distance_branch_status",
+                "patch_occupancy_out_tracking_distance_status",
+            )
+        },
         "bootstrap": {
             "block_lengths": all_blocks,
             "main_block_length": main_block,
@@ -305,11 +368,11 @@ def analyse(run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
         },
     }
 
-    summary.to_csv(run_dir / "condition_summary.csv", index=False)
-    contrast_frame.to_csv(run_dir / "contrast_results.csv", index=False)
-    paired_frame.to_csv(run_dir / "paired_differences.csv")
-    bootstrap_frame.to_csv(run_dir / "bootstrap_results.csv", index=False)
-    matrix.to_csv(run_dir / "mae_matrix.csv")
-    (run_dir / "analysis.json").write_text(json.dumps(payload, indent=2, default=str))
-    (run_dir / "decision.json").write_text(json.dumps(decision.as_dict(), indent=2, default=str))
+    summary.to_csv(out_dir / "condition_summary.csv", index=False)
+    contrast_frame.to_csv(out_dir / "contrast_results.csv", index=False)
+    paired_frame.to_csv(out_dir / "paired_differences.csv")
+    bootstrap_frame.to_csv(out_dir / "bootstrap_results.csv", index=False)
+    matrix.to_csv(out_dir / "mae_matrix.csv")
+    (out_dir / "analysis.json").write_text(json.dumps(payload, indent=2, default=str))
+    (out_dir / "decision.json").write_text(json.dumps(decision.as_dict(), indent=2, default=str))
     return payload

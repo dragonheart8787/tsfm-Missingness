@@ -20,18 +20,45 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Analyse a completed pilot run.")
     parser.add_argument("--config", default="configs/pilot_config.yaml")
     parser.add_argument("--run-dir", default="results/pilot_v1")
+    parser.add_argument(
+        "--out-dir",
+        default=None,
+        help=(
+            "Where to write the analysis. Defaults to --run-dir. Point this at a separate "
+            "directory to run a POST-HOC re-analysis without overwriting the original run's "
+            "preregistered outputs."
+        ),
+    )
+    parser.add_argument(
+        "--allow-overwrite",
+        action="store_true",
+        help="Permit replacing an existing decision.json produced by a different rule version.",
+    )
     args = parser.parse_args()
 
     config = yaml.safe_load((REPO_ROOT / args.config).read_text())
-    payload = analyse(REPO_ROOT / args.run_dir, config)
+    out_dir = REPO_ROOT / args.out_dir if args.out_dir else None
+    payload = analyse(
+        REPO_ROOT / args.run_dir,
+        config,
+        out_dir=out_dir,
+        allow_overwrite=args.allow_overwrite,
+    )
 
     print(json.dumps({
+        "decision_rule_version": payload["decision_rule_version"],
         "mean_clean_mae": payload["mean_clean_mae"],
         "n_origins": payload["n_origins"],
         "n_failed_forecasts": payload["n_failed_forecasts"],
         "decision": payload["decision"]["label"],
         "triggers": payload["decision"]["triggers"],
     }, indent=2))
+
+    print("\nDistance-relative check status (per contrast):")
+    for check, per_contrast in payload["distance_relative_check_status"].items():
+        print(f"  {check}")
+        for contrast_id, entry in sorted(per_contrast.items()):
+            print(f"    {contrast_id:<12} {entry['status']:<14} {entry['reason']}")
     for row in payload["contrasts"]:
         print(
             f"\n{row['contrast_id']} [{row['kind']}] {row['label']}\n"

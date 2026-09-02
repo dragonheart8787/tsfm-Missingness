@@ -136,7 +136,7 @@ alternatives are live, and they are not mutually exclusive:
 | # | Alternative explanation | Can this pilot's diagnostics distinguish it? |
 |---|---|---|
 | 1 | **Effective forecast distance.** With the last 64 (or 128) observations removed, the model's nearest real observation is 64 (128) steps further from the forecast, so it is effectively forecasting a longer horizon. | **No.** This is inseparable from block position by construction — moving the block toward the boundary *is* increasing the effective forecast distance. The diagnostics record `nearest_missing_to_boundary` and `trailing_run_length`, which quantify it, but the design cannot break the confound. This is the single most important limitation of the location contrast. |
-| 2 | **Removed local volatility / level / slope.** The removed segment near the boundary may simply be more informative — higher variance, a stronger trend, a level shift — than a segment 256 steps back. | **Partially.** `removed_variance`, `removed_slope`, `removed_abs_diff_mean`, `removed_mean`, `removed_min/max` are recorded per mask, and the decision function computes their rank correlation with the paired difference and compares it against distance's. It can detect that a confounder *out-tracks* distance; it cannot cleanly decompose the two. |
+| 2 | **Removed local volatility / level / slope.** The removed segment near the boundary may simply be more informative — higher variance, a stronger trend, a level shift — than a segment 256 steps back. | **Diagnostics recorded, but the automated comparison is NOT EVALUABLE here.** `removed_variance`, `removed_slope`, `removed_abs_diff_mean`, `removed_mean`, `removed_min/max` are recorded per mask and remain available for inspection. The automated "does this confounder out-track distance?" check, however, cannot be run on the preregistered contrasts: each is a fixed two-arm comparison in which distance is constant across all 178 origins, so distance's rank correlation is undefined. See §8.1. Distinguishing these confounders from distance needs a design that varies distance within the comparison. |
 | 3 | **Chronos-2's internal scaling.** Chronos-2 applies a NaN-aware instance normalisation whose location and scale are computed from the *retained* observations only. Removing a boundary block therefore changes the normalisation itself, not just the information content. | **Partially.** `retained_context_mean/std`, `retained_mean_change_frac_of_clean_std` and `retained_std_ratio` are recorded per mask, and `rho_scaling` is a PIVOT trigger. This detects association with the scaling shift; it does not separate "the model was renormalised" from "the model lost information". |
 | 4 | **Patch occupancy / patch position.** Chronos-2 patches the context; a mask that wipes whole patches removes whole tokens, while one that partially fills patches degrades them. | **Largely yes, for the block contrasts.** All ten block positions are asserted to be exactly patch-aligned on the model's real, verified patch grid, so every block arm removes whole patches and `n_patches_partially_missing == 0`. Any nonzero value there is a PIVOT trigger. For the random arms partial-patch occupancy is unavoidable and large — which is precisely part of why C3/C4 are pipeline comparisons. |
 | 5 | **Seasonal phase of the removed observations.** A 64-step block spans exactly 2.67 days; hour-of-day composition varies with position. | **Partially.** `removed_hour_entropy_normalised` and `removed_hour_max_share` are recorded. For blocks whose length is a multiple of 24 the composition is near-uniform by construction, which limits how much this can explain — but 64 and 128 are not multiples of 24, so it is not eliminated. |
@@ -178,7 +178,61 @@ with the standing caveat that those are pipeline comparisons.
 **PIVOT triggers**, each implemented and unit-tested: effect only at 40%;
 material shift across bootstrap block lengths; a handful of origins dominating;
 a removed-segment confounder out-tracking distance; internal scaling explaining
-the pattern; patch position as a plausible confound.
+the pattern; patch position as a plausible confound. Three of these compare a
+confounder's rank correlation against distance's; on the preregistered contrasts
+those comparisons are **not evaluable** and carry no weight — see §8.1.
+
+### 8.1 Post-run correction: `confounder_out_tracks_distance` is not evaluable
+
+PIVOT was originally triggered by three automated checks. Post-run audit found
+that `confounder_out_tracks_distance` was not evaluable for the preregistered
+two-arm contrasts because distance was constant and its undefined correlation
+had been coerced to zero. This trigger therefore receives no evidentiary weight.
+The PIVOT decision remains unchanged based on bootstrap instability,
+scaling-related diagnostics, distributional inconsistency, and the unresolved
+effective-forecast-distance confound.
+
+**Why the correlation is undefined.** Each preregistered contrast compares two
+fixed arms — for C1, the d=0 block against the d=256 block. Every origin's
+subtrahend arm therefore sits at the *same* distance to the forecast boundary,
+so `mean_missing_distance_to_boundary` is constant across all 178 origins and a
+Spearman correlation against it has no defined value. Decision rule v1 replaced
+that undefined value with `0.0` before comparing each confounder's |rho| against
+it. That manufactures a baseline of "distance explains nothing", against which
+almost any confounder wins — so the check fired largely independently of the
+data. Raising the margin would not repair this: it would only make an invalid
+comparison more conservative, not valid.
+
+**What changed.** Decision rule **v2** reports each distance-relative check as
+one of four explicit states — `not_evaluable`, `invalid_input`, `false`, `true`
+— and only `true` may contribute a trigger. `not_evaluable` is structurally
+distinct from `false`: it means the question could not be asked, not that the
+answer was no. The same NaN-to-zero collapse appeared in two further places, and
+both are fixed identically:
+
+| Check | Distance-free branch | Distance-relative branch |
+|---|---|---|
+| `confounder_out_tracks_distance` | none — wholly distance-relative | `not_evaluable` |
+| `internal_scaling_explains_pattern` | absolute \|rho_scaling\| ≥ threshold — **still live** | `not_evaluable` |
+| `patch_position_confound` | partially-missing patches in a block arm — **still live** | `not_evaluable` |
+
+The distance-free branches are unaffected and continue to carry evidentiary
+weight normally.
+
+**Where to find each version's output.**
+
+| Version | File | Status |
+|---|---|---|
+| v1 | `results/pilot_v1/decision.json`, `results/pilot_v1/analysis.json` | **Preregistered record of the original run. Not modified.** |
+| v2 | `results/pilot_v1/post_hoc_reanalysis_v2/decision.json`, `.../analysis.json` | **Post-hoc sensitivity analysis**, re-derived from the same `window_results.csv` and `mask_diagnostics.csv` with no new model inference. Not a replacement for the preregistered output. |
+
+Every decision output carries a `decision_rule_version` field, and the analysis
+step refuses to overwrite a `decision.json` written under a different rule
+version unless explicitly told to.
+
+**This is a correction to the decision logic, not to the measurements.** No
+forecast, metric, bootstrap interval or contrast estimate changes between v1 and
+v2 — only which automated checks are permitted to claim they found something.
 
 ---
 

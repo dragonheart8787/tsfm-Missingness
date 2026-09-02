@@ -72,6 +72,22 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 .venv/bin/python scripts/make_figures.py --run-dir results/pilot_v1
 ```
 
+### Re-analysing a completed run without disturbing its record
+
+The analysis step reads from `--run-dir` and writes to `--out-dir` (defaulting
+to `--run-dir`). To re-derive the decision under a newer rule version, point
+`--out-dir` somewhere separate — the original run's outputs are the record of
+what it produced at the time and must stay intact:
+
+```bash
+.venv/bin/python scripts/analyze_run.py \
+  --run-dir results/pilot_v1 \
+  --out-dir  results/pilot_v1/post_hoc_reanalysis_v2
+```
+
+No model inference is involved. Writing over a `decision.json` produced under a
+different `decision_rule_version` is refused unless you pass `--allow-overwrite`.
+
 ### Unattended execution
 
 ```bash

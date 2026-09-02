@@ -20,9 +20,17 @@ labels whose criteria are not mutually exclusive):
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
+
+# Version of the decision logic that produced a given output.
+#   v1 - original. Coerced an undefined rho_distance (NaN) to 0.0 before
+#        comparing confounder correlations against it, which manufactured a
+#        comparison baseline that does not exist.
+#   v2 - current. Distance-relative comparisons report an explicit status and
+#        are `not_evaluable` when distance is constant within the contrast.
+DECISION_RULE_VERSION = "v2"
 
 
 def _spearman(x: np.ndarray, y: np.ndarray) -> float:
@@ -39,6 +47,104 @@ def _spearman(x: np.ndarray, y: np.ndarray) -> float:
     if np.std(rx) == 0 or np.std(ry) == 0:
         return float("nan")
     return float(np.corrcoef(rx, ry)[0, 1])
+
+
+# Outcome of a "does confounder X out-track distance?" comparison.
+#   not_evaluable - distance is constant within this contrast, so its
+#                   correlation is mathematically undefined. NOT a null result.
+#   invalid_input - distance genuinely varies but rho_distance is non-finite;
+#                   something upstream is wrong. NOT a null result either.
+#   false         - evaluated; no confounder exceeded distance by the margin.
+#   true          - evaluated; at least one confounder did.
+DistanceComparisonStatus = Literal["not_evaluable", "invalid_input", "false", "true"]
+
+NOT_EVALUABLE_CONSTANT_DISTANCE = "distance_constant_within_contrast"
+INVALID_RHO_DISTANCE = "rho_distance_non_finite_despite_varying_distance"
+
+
+@dataclass
+class DistanceComparison:
+    """A single confounder-vs-distance comparison and why it came out that way.
+
+    Only ``status == "true"`` may contribute a PIVOT trigger. ``not_evaluable``
+    and ``invalid_input`` are structurally distinct from ``false``: they mean
+    the question could not be asked, not that the answer was no.
+    """
+
+    status: DistanceComparisonStatus
+    reason: str
+    n_unique_finite_distance: int
+    rho_distance: float
+    compared: list[str] = field(default_factory=list)
+    exceeding: list[str] = field(default_factory=list)
+
+    @property
+    def is_trigger(self) -> bool:
+        return self.status == "true"
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _unique_finite_count(values) -> int:
+    array = np.asarray(list(values), dtype=np.float64)
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        return 0
+    return int(np.unique(finite).size)
+
+
+def compare_confounders_to_distance(
+    *,
+    rho_distance: float,
+    distance_values,
+    candidates: dict[str, float],
+    margin: float,
+) -> DistanceComparison:
+    """Ask whether any candidate confounder out-tracks distance, honestly.
+
+    The preregistered contrasts are fixed two-arm comparisons: every origin's
+    subtrahend arm sits at the SAME distance to the forecast boundary. A rank
+    correlation against a constant is undefined, not zero. Coercing it to zero
+    (as decision rule v1 did) invents a baseline of "distance explains nothing",
+    against which almost any confounder wins — so the check fired essentially
+    independently of the data. This function refuses to answer instead.
+    """
+    n_unique = _unique_finite_count(distance_values)
+
+    if n_unique < 2:
+        return DistanceComparison(
+            status="not_evaluable",
+            reason=NOT_EVALUABLE_CONSTANT_DISTANCE,
+            n_unique_finite_distance=n_unique,
+            rho_distance=float(rho_distance),
+        )
+
+    if not np.isfinite(rho_distance):
+        # Distance varies, so this SHOULD have been computable. Do not let it
+        # share the constant-distance path, and never treat it as a null.
+        return DistanceComparison(
+            status="invalid_input",
+            reason=INVALID_RHO_DISTANCE,
+            n_unique_finite_distance=n_unique,
+            rho_distance=float(rho_distance),
+        )
+
+    # Both sides finite: the comparison is meaningful.
+    compared = [name for name, rho in candidates.items() if np.isfinite(rho)]
+    exceeding = [
+        name
+        for name in compared
+        if abs(candidates[name]) > abs(rho_distance) + margin
+    ]
+    return DistanceComparison(
+        status="true" if exceeding else "false",
+        reason="confounder_exceeds_distance" if exceeding else "no_confounder_exceeds_distance",
+        n_unique_finite_distance=n_unique,
+        rho_distance=float(rho_distance),
+        compared=sorted(compared),
+        exceeding=sorted(exceeding),
+    )
 
 
 @dataclass
@@ -71,6 +177,10 @@ class ContrastStat:
     top_origin_share: float = float("nan")
     # |Spearman(paired difference, X)| across origins.
     rho_distance: float = float("nan")
+    # The per-origin distance-to-boundary values rho_distance was computed
+    # against. Needed to tell "distance is constant, so the correlation is
+    # undefined" apart from "the correlation was computed and came out small".
+    distance_values: list[float] = field(default_factory=list)
     rho_confounders: dict[str, float] = field(default_factory=dict)
     rho_scaling: float = float("nan")
     n_partially_missing_patches_max: int = 0
@@ -103,6 +213,8 @@ class Decision:
     go_family: str | None                   # "location" | "geometry" | None
     triggers: list[str]
     criteria: dict[str, Any]
+    # Which decision logic produced this output. See DECISION_RULE_VERSION.
+    decision_rule_version: str = DECISION_RULE_VERSION
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -273,37 +385,71 @@ def _pivot_triggers(inputs: DecisionInputs) -> tuple[list[str], dict[str, Any]]:
         triggers.append(f"origin_dominance:{','.join(sorted(dominated))}")
 
     # (d) effect tracks removed-segment properties more than distance.
+    #
+    # Entirely distance-relative: there is no distance-free branch here, so when
+    # distance is constant within the contrast this check is `not_evaluable` as
+    # a whole and contributes nothing to the decision.
     margin = float(cfg["confounder_margin_over_distance"])
-    out_tracked: dict[str, list[str]] = {}
-    for stat in inputs.contrasts:
-        rho_d = abs(stat.rho_distance) if np.isfinite(stat.rho_distance) else 0.0
-        beating = [
-            name
-            for name, rho in stat.rho_confounders.items()
-            if np.isfinite(rho) and abs(rho) > rho_d + margin
-        ]
-        if beating:
-            out_tracked[stat.contrast_id] = sorted(beating)
+    confounder_checks = {
+        stat.contrast_id: compare_confounders_to_distance(
+            rho_distance=stat.rho_distance,
+            distance_values=stat.distance_values,
+            candidates=stat.rho_confounders,
+            margin=margin,
+        )
+        for stat in inputs.contrasts
+    }
+    out_tracked = {
+        cid: check.exceeding for cid, check in confounder_checks.items() if check.is_trigger
+    }
     detail["rho_distance"] = {s.contrast_id: s.rho_distance for s in inputs.contrasts}
     detail["rho_confounders"] = {s.contrast_id: s.rho_confounders for s in inputs.contrasts}
     detail["confounder_margin_over_distance"] = margin
     detail["confounders_out_tracking_distance"] = out_tracked
+    detail["confounder_out_tracks_distance_status"] = {
+        cid: check.as_dict() for cid, check in confounder_checks.items()
+    }
     if out_tracked:
         triggers.append(f"confounder_out_tracks_distance:{','.join(sorted(out_tracked))}")
 
     # (e) Chronos-2's internal scaling behaviour explains most of the pattern.
+    #
+    # This check has TWO independent branches. The first is an absolute
+    # threshold on |rho_scaling| and involves distance not at all, so it stays
+    # fully live. The second is distance-relative and gets the same honest
+    # status treatment as (d): when distance is constant it is `not_evaluable`
+    # and contributes nothing. The trigger can still fire on the absolute
+    # branch alone.
     scaling_threshold = float(cfg["scaling_abs_spearman"])
+    scaling_absolute = {
+        s.contrast_id: s.rho_scaling
+        for s in inputs.contrasts
+        if np.isfinite(s.rho_scaling) and abs(s.rho_scaling) >= scaling_threshold
+    }
+    scaling_distance_checks = {
+        stat.contrast_id: compare_confounders_to_distance(
+            rho_distance=stat.rho_distance,
+            distance_values=stat.distance_values,
+            candidates={"rho_scaling": stat.rho_scaling},
+            margin=margin,
+        )
+        for stat in inputs.contrasts
+    }
+    scaling_distance_relative = {
+        cid: check.exceeding for cid, check in scaling_distance_checks.items() if check.is_trigger
+    }
     scaling_flagged = {
         s.contrast_id: s.rho_scaling
         for s in inputs.contrasts
-        if np.isfinite(s.rho_scaling)
-        and (
-            abs(s.rho_scaling) >= scaling_threshold
-            or abs(s.rho_scaling) > (abs(s.rho_distance) if np.isfinite(s.rho_distance) else 0.0) + margin
-        )
+        if s.contrast_id in scaling_absolute or s.contrast_id in scaling_distance_relative
     }
     detail["rho_scaling"] = {s.contrast_id: s.rho_scaling for s in inputs.contrasts}
     detail["scaling_threshold"] = scaling_threshold
+    detail["scaling_flagged_by_absolute_threshold"] = scaling_absolute
+    detail["scaling_flagged_by_distance_comparison"] = scaling_distance_relative
+    detail["internal_scaling_distance_branch_status"] = {
+        cid: check.as_dict() for cid, check in scaling_distance_checks.items()
+    }
     if scaling_flagged:
         triggers.append(f"internal_scaling_explains_pattern:{','.join(sorted(scaling_flagged))}")
 
@@ -316,15 +462,36 @@ def _pivot_triggers(inputs: DecisionInputs) -> tuple[list[str], dict[str, Any]]:
         for s in inputs.contrasts
         if s.kind == "causal_contrast_within_pattern" and s.n_partially_missing_patches_max > 0
     }
+    # The partial-patch branch above is distance-free and stays live. The
+    # patch-occupancy-vs-distance branch below is distance-relative and gets
+    # the same status treatment.
+    patch_distance_checks = {
+        stat.contrast_id: compare_confounders_to_distance(
+            rho_distance=stat.rho_distance,
+            distance_values=stat.distance_values,
+            candidates={
+                "n_patches_fully_missing": stat.rho_confounders.get(
+                    "n_patches_fully_missing", float("nan")
+                )
+            },
+            margin=margin,
+        )
+        for stat in inputs.contrasts
+    }
     patch_rho_flagged = {
-        s.contrast_id: s.rho_confounders.get("n_patches_fully_missing")
-        for s in inputs.contrasts
-        if np.isfinite(s.rho_confounders.get("n_patches_fully_missing", float("nan")))
-        and abs(s.rho_confounders["n_patches_fully_missing"])
-        > (abs(s.rho_distance) if np.isfinite(s.rho_distance) else 0.0) + margin
+        cid: next(
+            s.rho_confounders.get("n_patches_fully_missing")
+            for s in inputs.contrasts
+            if s.contrast_id == cid
+        )
+        for cid, check in patch_distance_checks.items()
+        if check.is_trigger
     }
     detail["block_arms_with_partial_patches"] = patch_flagged
     detail["patch_occupancy_out_tracking_distance"] = patch_rho_flagged
+    detail["patch_occupancy_out_tracking_distance_status"] = {
+        cid: check.as_dict() for cid, check in patch_distance_checks.items()
+    }
     if patch_flagged or patch_rho_flagged:
         names = sorted(set(patch_flagged) | set(patch_rho_flagged))
         triggers.append(f"patch_position_confound:{','.join(names)}")
@@ -346,12 +513,20 @@ def decide(inputs: DecisionInputs) -> Decision:
     pivot_triggers, pivot_detail = _pivot_triggers(inputs)
 
     criteria: dict[str, Any] = {
+        "decision_rule_version": DECISION_RULE_VERSION,
         "mean_clean_mae": inputs.mean_clean_mae,
         "location_go": location_detail,
         "geometry_go": geometry_detail,
         "no_go": no_go_detail,
         "pivot": pivot_detail,
         "precedence": ["NO-GO", "PIVOT", "GO", "PIVOT(residual)"],
+        "note_distance_relative_checks": (
+            "Checks that compare a confounder's rank correlation against distance's are "
+            "reported with an explicit status. For the preregistered two-arm contrasts "
+            "distance is constant across origins, so its correlation is undefined and the "
+            "status is 'not_evaluable' - which is not the same as 'evaluated, no effect' "
+            "and carries no evidentiary weight either way."
+        ),
         "note_geometry_family_is_pipeline_comparison": (
             "Contrasts C3/C4 compare a random-mask arm with a block arm and are pipeline "
             "comparisons, not pure causal estimates of contiguity."
