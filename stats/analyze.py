@@ -28,6 +28,7 @@ from stats.decision import (
     DecisionInputs,
     _spearman,
     decide,
+    top_origin_share,
 )
 
 # Confounder columns correlated against each contrast's paired differences.
@@ -191,12 +192,8 @@ def analyse(
             else float("nan")
         )
 
-        # Origin dominance: share of the summed paired difference held by the
-        # top `dominance_frac` of origins ranked by |paired difference|.
-        magnitude = np.abs(diffs)
-        total = magnitude.sum()
-        k = max(1, int(np.ceil(dominance_frac * magnitude.size)))
-        top_share = float(np.sort(magnitude)[-k:].sum() / total) if total > 0 else float("nan")
+        # Origin dominance, via the shared implementation.
+        top_share = top_origin_share(diffs, top_frac=dominance_frac)
 
         partial_patches = 0
         for label in (contrast.minuend_label, contrast.subtrahend_label):

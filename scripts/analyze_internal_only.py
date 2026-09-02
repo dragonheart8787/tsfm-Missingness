@@ -66,6 +66,41 @@ def main() -> int:
             )
         )
 
+    print("\n--- 1b. BOUNDARY JUMP: d=0 vs the nearest internal position ---")
+    print("    Directly bootstrapped from per-origin paired values.")
+    print("    NOT derived by subtracting other contrasts - their CIs cannot be differenced.")
+    print("    Holm family: {BJ1_20, BJ2_40}, independent of every other family.")
+    for row in payload["boundary_jump_contrasts"]:
+        print(
+            f"\n{row['contrast_id']}  {row['label']}\n"
+            f"  raw MAE diff      : {row['raw_mae_difference']:+.6f}"
+            f" ({row['pct_of_mean_clean_mae']:+.2f}% of mean clean MAE)\n"
+            f"  Holm 95% CI       : [{row['holm_ci95_low']:+.6f}, {row['holm_ci95_high']:+.6f}]"
+            f"  adj p={row['holm_adjusted_p']:.4g}  rejects={row['holm_rejects']}\n"
+            f"  90% CI (uncorr.)  : [{row['uncorrected_ci90_low']:+.6f}, "
+            f"{row['uncorrected_ci90_high']:+.6f}]\n"
+            f"  median paired diff: {row['median_paired_difference']:+.6f}"
+            f"   frac origins > 0: {row['frac_origins_positive']:.3f}\n"
+            f"  top-5% origin share: {row['top_origin_share']:.4f}\n"
+            f"  block-length sens.: "
+            + ", ".join(
+                f"b={b}:{row[f'estimate_block_len_{b}']:+.6f}"
+                for b in (4, 8, 12) if f"estimate_block_len_{b}" in row
+            )
+        )
+
+    print("\n--- 1c. EQUIVALENCE CHECK on the internal contrasts ---")
+    conv = payload["equivalence_convention"]
+    print(f"    Convention: {conv['rule']}")
+    print(f"    Band: +/-{conv['band_frac']:.0%} of mean clean MAE = +/-{conv['band_abs']:.6f}")
+    print(f"    {conv['note']}")
+    for row in payload["internal_equivalence_check"]:
+        print(
+            f"  {row['contrast_id']:<10} 90% CI [{row['ci90_low']:+.6f}, {row['ci90_high']:+.6f}]"
+            f"   equivalence_established = {row['equivalence_established']}"
+        )
+        print(f"             {row['interpretation']}")
+
     print("\n--- 2a. SECONDARY: pairwise internal contrasts (diagnostic only) ---")
     print("    Holm applied within each rate's 6-contrast family, independently.")
     for row in payload["pairwise_contrasts"]:
@@ -105,16 +140,39 @@ def main() -> int:
             f"frac > 0: {row['frac_origins_positive']:.3f}"
         )
 
-    print("\n--- 4. Confounder-difference correlations rho(dMAE, dz), primary contrasts ---")
-    print("    Holm within each contrast's pre-specified 4-item family.")
-    print(f"  {'contrast':<12} {'confounder':<42} {'status':<14} {'rho':>8} {'adj p':>10}")
-    for row in payload["confounder_difference_correlations"]:
-        rho = f"{row['rho']:+.4f}" if row["rho"] == row["rho"] else "n/a"
-        adj = f"{row['holm_adjusted_p']:.4g}" if row["holm_adjusted_p"] == row["holm_adjusted_p"] else "n/a"
+    def _confounder_table(rows, heading, caption):
+        print(f"\n{heading}")
+        print(f"    {caption}")
         print(
-            f"  {row['contrast_id']:<12} {row['confounder']:<42} "
-            f"{row['status']:<14} {rho:>8} {adj:>10}   {row['reason']}"
+            f"  {'contrast':<10} {'confounder':<40} {'status':<12} {'rho':>8} "
+            f"{'param p':>9} {'boot 95% CI on rho':>24} {'excl 0':>7}"
         )
+        for row in rows:
+            rho = f"{row['rho']:+.4f}" if row["rho"] == row["rho"] else "n/a"
+            pval = f"{row['p_value']:.4g}" if row["p_value"] == row["p_value"] else "n/a"
+            if row["rho_ci95_low"] == row["rho_ci95_low"]:
+                ci = f"[{row['rho_ci95_low']:+.4f}, {row['rho_ci95_high']:+.4f}]"
+            else:
+                ci = "n/a"
+            print(
+                f"  {row['contrast_id']:<10} {row['confounder']:<40} "
+                f"{row['status']:<12} {rho:>8} {pval:>9} {ci:>24} "
+                f"{str(row['rho_ci95_excludes_zero']):>7}"
+            )
+
+    _confounder_table(
+        payload["confounder_difference_correlations"],
+        "--- 4a. Confounder-difference rho(dMAE, dz) vs. the BOUNDARY JUMP ---",
+        "dz = confounder at d=0 minus its value at the nearest internal position.\n"
+        "    Holm within each BJ contrast's pre-specified 4-item family. The parametric\n"
+        "    p-value assumes independent observations; origins are not independent, so the\n"
+        "    moving-block bootstrap CI on rho is reported alongside it and neither stands alone.",
+    )
+    _confounder_table(
+        payload["confounder_difference_internal_contrasts"],
+        "--- 4b. RETAINED from the previous round: rho vs. the INTERNAL variation ---",
+        payload["confounder_difference_internal_contrasts_caption"],
+    )
 
     print("\nInterpretation is deliberately NOT offered here: these are numbers for the "
           "Research Lead to weigh, not a decision.")

@@ -7,6 +7,13 @@ Every section below that would report empirical results is marked
 `PENDING EXECUTION` rather than filled with a placeholder. No number in this
 document is fabricated.
 
+**Update.** The pilot has since been executed and `results/pilot_v1/` exists on
+the operator's host. Its outputs are not present in the environment where this
+report is maintained, because `results/` is gitignored and was never committed.
+The `PENDING EXECUTION` markers below therefore still stand, and still mean
+exactly what they said: the numbers are not available here, and none have been
+invented to fill the gap. §9.10 lists the commands that produce them.
+
 This report is written to be read alongside `results/<run>/decision.json`, which
 is the machine-readable, deterministic decision output. Where this prose and
 that file could ever disagree, the file is authoritative.
@@ -35,8 +42,21 @@ proximity-weighted severity score. It is a small, preregistered measurement.
 
 ## 2. Observed result
 
-`PENDING EXECUTION.` Populated from `results/<run>/condition_summary.csv` and
-`contrast_results.csv` after the GPU run.
+`PENDING EXECUTION` — **and still pending for a reason that is not the GPU run.**
+The pilot has been executed and `results/pilot_v1/` exists on the operator's
+host, but that directory is not present in the environment where this report is
+maintained (`results/` is gitignored and the outputs were never committed). The
+numbers are therefore not available to paste in here, and none have been
+invented. Filling this section requires running, on the host that holds the run:
+
+```bash
+.venv/bin/python scripts/analyze_run.py --run-dir results/pilot_v1 \
+  --out-dir results/pilot_v1/post_hoc_reanalysis_v2
+.venv/bin/python scripts/analyze_internal_only.py --run-dir results/pilot_v1
+```
+
+and pasting the outputs. Sources once available: `condition_summary.csv` and
+`contrast_results.csv`.
 
 To be reported here, without interpretation:
 
@@ -50,9 +70,12 @@ To be reported here, without interpretation:
 
 ## 3. Statistical evidence
 
-`PENDING EXECUTION.` Populated from `bootstrap_results.csv` and `analysis.json`.
+`PENDING EXECUTION` — for the same reason as §2: the run exists, but its outputs
+are not present in this environment. Sources once available:
+`bootstrap_results.csv` and `analysis.json`, plus the v2 decision re-derivation
+in `post_hoc_reanalysis_v2/`.
 
-The analysis that will run, fixed in advance:
+The analysis that runs, fixed in advance:
 
 * **Pairing.** Everything is paired by evaluation origin. The three point-random
   seeds are averaged *within* origin before any contrast is formed; they are
@@ -122,8 +145,16 @@ two whole pipelines, not an isolated contiguity effect.
 
 ## 6. Untested speculation
 
-`PENDING EXECUTION.` Anything in this section is explicitly speculation, is
-labelled as such, and feeds no part of the decision rule.
+`PENDING EXECUTION` — for the same reason as §2. Anything eventually written
+here is explicitly speculation, is labelled as such, and feeds no part of the
+decision rule.
+
+**Language discipline for this section when filled.** The trailing-gap and
+effective-horizon readings of the boundary jump (§9.4) belong here, as
+speculation, until the experiment drafted in
+`docs/next_round_trailing_gap_mechanism.md` has been run. Specifically: this
+pilot does not distinguish loss of recent observations from Chronos-2-specific
+handling of trailing missingness, and no wording here may imply that it does.
 
 ---
 
@@ -153,9 +184,15 @@ requires a design change, not more data.
 
 ## 8. Decision
 
-`PENDING EXECUTION.` The label comes from `stats/decision.py`, a pure
-deterministic function over the computed statistics. It is not a narrative
-judgement and cannot be overridden by this document.
+`PENDING EXECUTION` — for the same reason as §2. The label comes from
+`stats/decision.py`, a pure deterministic function over the computed statistics.
+It is not a narrative judgement and cannot be overridden by this document.
+
+Two files will carry it, and they must not be conflated (see §8.1):
+`results/pilot_v1/decision.json` (rule **v1**, the preregistered record of what
+the original run produced) and
+`results/pilot_v1/post_hoc_reanalysis_v2/decision.json` (rule **v2**, the
+post-hoc correction). Quote the label from both, with their versions.
 
 Precedence, fixed in advance and unit-tested:
 
@@ -279,7 +316,8 @@ merged into any of them and is **not re-corrected**.
 | Family | Members | Note |
 |---|---|---|
 | `{C1, C2, C3, C4}` | 4 | Original preregistered family — untouched |
-| `{IC1_20, IC2_40}` | 2 | §9.3 primary, new and separate |
+| `{IC1_20, IC2_40}` | 2 | §9.3 internal-position primary |
+| `{BJ1_20, BJ2_40}` | 2 | §9.4 boundary jump, independent of every other family |
 | Pairwise, 20% | 6 | §9.4, corrected within rate |
 | Pairwise, 40% | 6 | §9.4, corrected within rate — two families of 6, never one of 12 |
 | Confounder Δz, per contrast | 4 each | §9.6 — two families of 4, never one of 8 |
@@ -294,7 +332,65 @@ Reported in the same format as C1–C4: raw MAE difference, % of mean clean MAE,
 Holm-corrected 95% CI, Holm-adjusted p, 90% CI, median paired difference,
 fraction of origins > 0, and sensitivity across bootstrap block lengths 4/8/12.
 
-### 9.4 Secondary: repeated-measures across the four internal positions
+### 9.4 Boundary-jump contrasts (`BJ1_20`, `BJ2_40`)
+
+* `BJ1_20` = 20%: `d=0` − `d=64`
+* `BJ2_40` = 40%: `d=0` − `d=48`
+
+**Computed directly, not by subtraction.** An earlier reading obtained the
+boundary jump by subtracting two already-bootstrapped contrasts
+(`C1_loc_20 − IC1_20`). That arithmetic is valid for the **point estimate** —
+the operation is linear, and a test asserts the two agree — but it is **not a
+valid confidence interval**. Both contrasts are measured on the same 178
+origins, so their difference's sampling distribution carries a covariance
+structure that differencing two separately drawn intervals discards. A test
+demonstrates that the naive subtraction yields a materially wider, and therefore
+wrong, interval. `BJ1_20` and `BJ2_40` are bootstrapped directly from the
+per-origin paired MAE values at the two conditions.
+
+Own Holm family `{BJ1_20, BJ2_40}`, independent of `{C1..C4}`, of
+`{IC1_20, IC2_40}`, of the two 6-item pairwise families, and of the
+confounder-difference families.
+
+`PENDING EXECUTION` — populated from
+`results/pilot_v1/post_hoc_internal_only_analysis/boundary_jump_contrasts.csv`.
+Reported in the same format as C1–C4 and IC1/IC2, plus the top-5% origin share
+(computed by the shared implementation in `stats/decision.py`).
+
+**Language discipline for this subsection when filled.** Report magnitude, CI
+and significance factually. Do **not** write that the jump is "localised
+entirely at the boundary", or upgrade it to a causal or definitive locational
+claim: the contrast measures a difference between two conditions, and §9.9 and
+the next-round design (`docs/next_round_trailing_gap_mechanism.md`) exist
+precisely because its mechanism is not established here.
+
+### 9.5 Equivalence check on the internal contrasts — non-significance is not equivalence
+
+`IC1_20` and `IC2_40` not reaching significance does **not** establish that
+there is no internal-position effect. The pilot already has a convention for
+when equivalence may be claimed, and it is applied here rather than eyeballed:
+the preregistered NO-GO rule's band, `decision.no_go.equivalence_band_frac_of_clean_mae`
+(±3% of mean clean MAE), with the requirement that the **90% CI lie entirely
+inside it**. The threshold is imported from that single definition; a test
+asserts the literal is not copied.
+
+Each contrast reports an explicit boolean `equivalence_established`, in
+`internal_equivalence_check.csv`, alongside the band's absolute value.
+
+`PENDING EXECUTION` — the boolean result per contrast.
+
+**Mandated wording for the internal-only finding**, replacing any formulation
+that says the location effect "vanishes" or that there is "no effect":
+
+> In a post-hoc internal-only analysis, we found no consistent evidence of a
+> monotonic block-location effect when observations immediately preceding the
+> forecast boundary remained available. The large endpoint contrast was
+> concentrated in the boundary-touching condition. This pattern is consistent
+> with trailing-gap or effective-horizon fragility, but does not distinguish the
+> loss of recent observations from Chronos-2-specific handling of trailing
+> missingness.
+
+### 9.6 Secondary: repeated-measures across the four internal positions
 
 **Categorical (diagnostic only, feeds nothing).** All 6 pairwise paired
 contrasts among the internal positions, per rate, Holm-corrected within rate.
@@ -313,17 +409,26 @@ offset across the four positions, so `slope(MAE_d − MAE_clean)` is identically
 `slope(MAE_d)`. The paired difference is used to keep the response on the same
 scale as everything else reported here; a test pins the equivalence.
 
-### 9.5 The trailing-boundary condition (`d=0`), reported separately
+### 9.7 The trailing-boundary condition (`d=0`), reported separately
 
 `PENDING EXECUTION` — `trailing_boundary_d0.csv`. Reported per rate with the
 same summary statistics as the internal contrasts, under
 `position_kind: trailing_boundary_condition`, and never pooled with them. The
 underlying numbers are from the original run; only their presentation is new.
 
-### 9.6 Revised confounder diagnostic: two-arm difference correlation
+### 9.8 Revised confounder diagnostic: two-arm difference correlation
 
-For the primary contrasts only: ρ(ΔMAE, Δz) across the 178 origins, where
-Δz = z(near position) − z(far position) per origin.
+**Correction from the previous round.** This diagnostic was previously computed
+against `IC1_20` / `IC2_40`, i.e. against the small internal-position variation.
+That tests what might explain the *internal* variation and says nothing about
+what drives the boundary jump. It is now computed against the **boundary-jump
+contrasts**, where Δz = z(`d=0`) − z(nearest internal position), correlated
+against the corresponding `BJ` paired MAE difference, per origin.
+
+The earlier `IC1_20` / `IC2_40` results are **retained, not deleted**, in
+`confounder_difference_internal_contrasts.csv`, relabelled to state exactly what
+they show: association (or its absence) with the small internal-position
+variation, and **not** a test of what drives the boundary jump.
 
 This is **well-posed**, and does not suffer the NaN problem that made the
 distance-based check not evaluable (§8.1): Δz genuinely varies across origins
@@ -346,9 +451,32 @@ actual **data problem**: it is classified `invalid_input` and surfaced, never
 `not_evaluable` and never silently zeroed. `not_evaluable` and `invalid_input`
 results are excluded from the Holm family entirely and can never become `true`.
 
-`PENDING EXECUTION` — `confounder_difference_correlations.csv`.
+**Both a parametric p-value and a bootstrap CI on ρ are reported, and neither
+stands alone.** The parametric Spearman p-value assumes independent
+observations; evaluation origins are not independent (stride 96 < context 320).
+ρ is therefore additionally bootstrapped with the same moving-block procedure
+(block lengths 4/8/12, 5,000 replicates, the same resampled origin index applied
+to both series so the pairing that defines ρ is preserved). The two can and do
+disagree — a Holm-adjusted `false` alongside a bootstrap CI excluding zero is a
+meaningful signal, not a contradiction to be resolved by picking one.
 
-### 9.7 Rejected alternative: the sliding-forecast-origin design
+**Language discipline for this subsection when filled.** Replace any formulation
+claiming "no alternative driver detected" or that a "confound audit has ruled
+out" an explanation with:
+
+> No statistically detectable association was found among the four measured
+> internal-contrast diagnostics; this analysis does not evaluate drivers of the
+> boundary jump.
+
+— and report the `BJ`-based results (above) as the actually-relevant diagnostic
+for the boundary jump specifically. Four measured diagnostics returning null is
+not an audit that rules anything out.
+
+`PENDING EXECUTION` — `confounder_difference_correlations.csv` (boundary jump,
+primary) and `confounder_difference_internal_contrasts.csv` (internal variation,
+retained and relabelled).
+
+### 9.9 Rejected alternative: the sliding-forecast-origin design
 
 A previously considered design would have slid the forecast origin forward to
 vary effective forecast distance directly. **It is rejected and no code for it
@@ -375,7 +503,16 @@ future preregistration round, not implemented here:
 That design is out of scope for this pilot and is recorded here only so the
 reasoning is not lost.
 
-### 9.8 Outputs
+**A different next-round design — the trailing-gap mechanism experiment — is
+drafted in `docs/next_round_trailing_gap_mechanism.md`.** It would separate loss
+of recent observations from effective-horizon extension from Chronos-2-specific
+trailing-missingness handling, via `trailing_nan(g)` / `truncated(g)` /
+`internal_block(g)` conditions at patch-aligned gap lengths. It requires new
+forecasts, **no code for it exists**, and it is deliberately sequenced to follow
+confirmation that the boundary jump is robust under §9.4 — not to run
+concurrently with it.
+
+### 9.10 Outputs
 
 All in `results/pilot_v1/post_hoc_internal_only_analysis/`. Nothing under
 `results/pilot_v1/` that existed before is read-modified or overwritten —
@@ -385,14 +522,17 @@ and a test enforces that the analysis writes nothing into the run directory.
 | File | Contents |
 |---|---|
 | `internal_primary_contrasts.csv` | IC1_20, IC2_40 — §9.3 |
+| `boundary_jump_contrasts.csv` | BJ1_20, BJ2_40, directly bootstrapped — §9.4 |
+| `internal_equivalence_check.csv` | `equivalence_established` per internal contrast — §9.5 |
 | `internal_pairwise_contrasts.csv` | 12 rows, 6 per rate — §9.4 |
 | `internal_trend_slopes.csv` | Mean trend slope and CIs, per rate — §9.4 |
 | `per_origin_trend_slopes.csv` | 178 per-origin slopes per rate |
 | `trailing_boundary_d0.csv` | `d=0`, separately labelled — §9.5 |
-| `confounder_difference_correlations.csv` | ρ(ΔMAE, Δz) with status typing — §9.6 |
+| `confounder_difference_correlations.csv` | ρ(ΔMAE, Δz) vs. the **boundary jump**, with status typing and bootstrap CI — §9.8 |
+| `confounder_difference_internal_contrasts.csv` | The same against the internal variation — retained and relabelled — §9.8 |
 | `internal_only_analysis.json` | All of the above plus the family declarations |
 
-### 9.9 Interpretation
+### 9.11 Interpretation
 
 Deliberately not offered here. The three-branch reading of these numbers — does
 an internal-only effect hold at both rates; is `d=0` the only condition that
@@ -462,6 +602,11 @@ adjustment — every d value would need recomputing on a different grid.
 | Per-origin isolation | One origin per call, `cross_learning=False`, plus an adversarial leakage probe |
 | Resume never duplicates or overwrites | Atomic checkpoint written **after** rows land on disk; resume intersects the checkpoint with what the results file actually contains |
 | Failures are recorded, not swallowed | Every failure produces its result row with `status="failed"` and the exception message |
+
+**Test suite size.** 172 non-model tests + 3 real-model tests (require GPU/model access) = 175 total. Stated this way rather than as a single number,
+because a bare count reads differently depending on whether the environment can
+load the model: on a CPU-only host 3 tests are deselected, so "175 tests" and
+"172 passed" are both true and neither is the whole picture.
 
 ---
 

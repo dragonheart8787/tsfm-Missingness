@@ -147,6 +147,44 @@ def compare_confounders_to_distance(
     )
 
 
+def top_origin_share(paired_differences, *, top_frac: float) -> float:
+    """Share of the summed |paired difference| held by the top `top_frac` origins.
+
+    The origin-dominance diagnostic. Shared so every caller measures dominance
+    identically rather than each re-deriving the same few lines.
+    """
+    magnitude = np.abs(np.asarray(paired_differences, dtype=np.float64))
+    magnitude = magnitude[np.isfinite(magnitude)]
+    if magnitude.size == 0:
+        return float("nan")
+    total = float(magnitude.sum())
+    if total <= 0:
+        return float("nan")
+    k = max(1, int(np.ceil(top_frac * magnitude.size)))
+    return float(np.sort(magnitude)[-k:].sum() / total)
+
+
+def equivalence_band(config: dict[str, Any], mean_clean_mae: float) -> float:
+    """The +/- band, in MAE units, that the preregistered NO-GO rule uses.
+
+    Single definition of the threshold, so an equivalence assessment anywhere in
+    the codebase cannot drift from the one the decision rule applies.
+    """
+    frac = float(config["decision"]["no_go"]["equivalence_band_frac_of_clean_mae"])
+    return frac * float(mean_clean_mae)
+
+
+def ci_within_equivalence_band(ci_low: float, ci_high: float, band: float) -> bool:
+    """Whether an interval lies entirely inside +/- band.
+
+    Note this is the ONLY way equivalence is ever established here: a CI that
+    merely includes zero is non-significance, which is not equivalence.
+    """
+    if not (np.isfinite(ci_low) and np.isfinite(ci_high)):
+        return False
+    return bool(ci_low >= -band and ci_high <= band)
+
+
 @dataclass
 class ContrastStat:
     """Everything the decision function needs about one contrast."""
@@ -263,12 +301,14 @@ def _family_go(
 
 def _no_go(inputs: DecisionInputs) -> tuple[bool, dict[str, Any]]:
     cfg = inputs.config["decision"]["no_go"]
-    band = float(cfg["equivalence_band_frac_of_clean_mae"]) * inputs.mean_clean_mae
+    band = equivalence_band(inputs.config, inputs.mean_clean_mae)
     ordering_threshold = float(cfg["location_ordering_abs_spearman"])
     seed_threshold = float(cfg["seed_sensitivity_frac_of_clean_mae"])
 
     within_band = {
-        s.contrast_id: bool(s.ci_low_equivalence >= -band and s.ci_high_equivalence <= band)
+        s.contrast_id: ci_within_equivalence_band(
+            s.ci_low_equivalence, s.ci_high_equivalence, band
+        )
         for s in inputs.contrasts
     }
     all_within_band = all(within_band.values())

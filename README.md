@@ -53,7 +53,9 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 # 2. Dataset (already validated; re-runs are idempotent)
 .venv/bin/python data/fetch_etth1.py --config configs/pilot_config.yaml
 
-# 3. Tests — all pass on CPU with the model mocked at the inference boundary
+# 3. Tests — 172 non-model tests + 3 real-model tests (require GPU/model access) = 175 total.
+#    The non-model tests all pass on CPU with the model mocked at the
+#    inference boundary; the 3 real-model tests need weights.
 .venv/bin/python -m pytest tests/ -v -m "not requires_model"
 
 # 4. Model contract gate — REQUIRED, needs Hugging Face access.
@@ -141,7 +143,7 @@ stats/                      bootstrap.py, contrasts.py, decision.py, analyze.py
 diagnostics/confounders.py  per-mask confounder table
 runner/                     windows.py (read-only targets), run_pilot.py (resumable)
 scripts/                    verify_model_contract.py, analyze_run.py, make_figures.py
-tests/                      93 CPU tests + 3 marked requires_model
+tests/                      172 non-model + 3 real-model (requires_model) = 175
 report/audit_report.md      interpretation-discipline report
 docs/                       ENVIRONMENT.md, SCHEMA.md
 ```

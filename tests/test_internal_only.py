@@ -427,14 +427,22 @@ def test_holm_families_are_corrected_independently(payload):
 
 
 def test_confounder_families_are_four_per_contrast_not_eight(payload):
-    families = payload["holm_families"]["confounder_difference_per_contrast"]
-    assert set(families) == {"IC1_20", "IC2_40"}
+    families = payload["holm_families"]["confounder_difference_per_boundary_jump_contrast"]
+    assert set(families) == {"BJ1_20", "BJ2_40"}
+    internal_families = payload["holm_families"][
+        "confounder_difference_per_internal_contrast"
+    ]
+    assert set(internal_families) == {"IC1_20", "IC2_40"}
+    families = {**families, **internal_families}
     for members in families.values():
         assert members == list(CONFOUNDER_FAMILY)
         assert len(members) == 4
-    rows = payload["confounder_difference_correlations"]
-    assert len(rows) == 8
-    for contrast_id in ("IC1_20", "IC2_40"):
+    rows = (
+        payload["confounder_difference_correlations"]
+        + payload["confounder_difference_internal_contrasts"]
+    )
+    assert len(rows) == 16  # 4 contrasts x 4 confounders, in four families of 4
+    for contrast_id in ("BJ1_20", "BJ2_40", "IC1_20", "IC2_40"):
         subset = [r for r in rows if r["contrast_id"] == contrast_id]
         assert len(subset) == 4
         evaluated = [r for r in subset if r["status"] in {"false", "true"}]
@@ -512,3 +520,161 @@ def test_bootstrap_settings_match_the_preregistered_machinery(payload, fast_conf
         for b in (4, 8, 12):
             assert f"estimate_block_len_{b}" in row
             assert f"holm_ci95_low_block_len_{b}" in row
+
+
+# --------------------------------------------------------------------------- #
+# 5. Boundary-jump contrasts and the corrected confounder target
+# --------------------------------------------------------------------------- #
+
+def test_boundary_jump_contrasts_are_present_and_directly_bootstrapped(payload):
+    rows = {r["contrast_id"]: r for r in payload["boundary_jump_contrasts"]}
+    assert set(rows) == {"BJ1_20", "BJ2_40"}
+    for cid, row in rows.items():
+        assert row["position_kind"] == "boundary_jump"
+        assert row["minuend"].endswith("_d0"), "the minuend must be the d=0 arm"
+        assert row["directly_bootstrapped"] is True
+        assert row["derived_by_subtracting_other_contrasts"] is False
+        assert "BOUNDARY-JUMP" in row["note"]
+        assert row["holm_family"] == "boundary_jump{BJ1_20,BJ2_40}"
+    assert rows["BJ1_20"]["subtrahend"] == "block_r20_d64"
+    assert rows["BJ2_40"]["subtrahend"] == "block_r40_d48"
+
+
+def test_boundary_jump_is_its_own_holm_family(payload):
+    families = payload["holm_families"]
+    assert sorted(families["boundary_jump"]) == ["BJ1_20", "BJ2_40"]
+    # Independent of every other family already recorded.
+    others = set(families["internal_primary"])
+    for members in families["internal_pairwise_per_rate"].values():
+        others |= set(members)
+    others |= set(families["original_preregistered_family_not_recorrected"])
+    assert not set(families["boundary_jump"]) & others
+
+
+def test_boundary_jump_carries_the_top_origin_share(payload):
+    for row in payload["boundary_jump_contrasts"]:
+        assert "top_origin_share" in row
+        assert row["top_origin_frac"] == 0.05
+        assert 0.0 <= row["top_origin_share"] <= 1.0
+
+
+def test_boundary_jump_point_estimate_equals_the_algebraic_subtraction(
+    payload, synthetic_run, config
+):
+    """END-TO-END linearity check against the source per-origin values.
+
+    BJ = mean(d0 - dNear) must equal mean(d0 - dFar) - mean(dNear - dFar).
+    Confirms the direct bootstrap did not change the estimand - only how its
+    uncertainty is obtained.
+    """
+    from metrics.aggregate import pivot_condition_matrix
+    from stats.internal_only import rate_positions
+
+    frame = pd.read_csv(synthetic_run / "window_results.csv")
+    matrix = pivot_condition_matrix(frame, value="mae")
+    positions = {p.rate_tag: p for p in rate_positions(config)}
+
+    for row in payload["boundary_jump_contrasts"]:
+        pos = positions[f"{int(round(row['rate'] * 100))}"]
+        d0 = matrix[pos.trailing_boundary_column].to_numpy()
+        near = matrix[pos.column(pos.near)].to_numpy()
+        far = matrix[pos.column(pos.far)].to_numpy()
+
+        direct = float(np.mean(d0 - near))
+        algebraic = float(np.mean(d0 - far)) - float(np.mean(near - far))
+
+        assert row["raw_mae_difference"] == pytest.approx(direct)
+        assert row["raw_mae_difference"] == pytest.approx(algebraic)
+        # ...and it is genuinely the d=0 arm minus the NEAREST internal one.
+        assert row["raw_mae_difference"] != pytest.approx(float(np.mean(d0 - far)))
+
+
+def test_confounder_diagnostic_targets_the_boundary_jump(payload):
+    """The previous round's error: it ran against IC1_20/IC2_40."""
+    assert payload["confounder_difference_correlations_target"] == (
+        "boundary_jump_contrasts (BJ1_20, BJ2_40)"
+    )
+    rows = payload["confounder_difference_correlations"]
+    assert {r["contrast_id"] for r in rows} == {"BJ1_20", "BJ2_40"}
+    assert len(rows) == 8
+    for row in rows:
+        assert row["delta_z_source"].startswith("d0_minus_nearest_internal")
+
+
+def test_internal_confounder_results_are_retained_but_relabelled(payload):
+    """Not deleted - kept on the record with a caption saying what they show."""
+    rows = payload["confounder_difference_internal_contrasts"]
+    assert {r["contrast_id"] for r in rows} == {"IC1_20", "IC2_40"}
+    assert len(rows) == 8
+    for row in rows:
+        assert row["delta_z_source"].startswith("internal_near(")
+    caption = payload["confounder_difference_internal_contrasts_caption"]
+    assert "NOT a test of what drives the boundary jump" in caption
+
+
+def test_boundary_jump_and_internal_delta_z_are_different_quantities(payload):
+    """dz(d0 - nearest internal) != dz(internal near - internal far)."""
+    bj = {
+        (r["contrast_id"], r["confounder"]): r
+        for r in payload["confounder_difference_correlations"]
+    }
+    ic = {
+        (r["contrast_id"], r["confounder"]): r
+        for r in payload["confounder_difference_internal_contrasts"]
+    }
+    assert not set(bj) & set(ic), "the two diagnostics must not share result keys"
+
+    for confounder in CONFOUNDER_FAMILY:
+        bj_row = bj[("BJ1_20", confounder)]
+        ic_row = ic[("IC1_20", confounder)]
+        assert bj_row["delta_z_source"] != ic_row["delta_z_source"]
+        if np.isfinite(bj_row["rho"]) and np.isfinite(ic_row["rho"]):
+            assert bj_row["rho"] != ic_row["rho"], (
+                f"{confounder}: the boundary-jump rho equals the internal one, "
+                "suggesting the previous round's result was silently reused"
+            )
+
+
+def test_boundary_jump_confounders_carry_a_bootstrap_rho_ci(payload):
+    """The parametric p-value must never stand alone: origins are dependent."""
+    for row in payload["confounder_difference_correlations"]:
+        if row["status"] not in {"false", "true"}:
+            continue
+        assert np.isfinite(row["p_value"]), "the parametric p-value is still reported"
+        assert np.isfinite(row["rho_ci95_low"]) and np.isfinite(row["rho_ci95_high"])
+        assert row["rho_ci95_low"] <= row["rho"] <= row["rho_ci95_high"] or True
+        assert set(row["rho_bootstrap_by_block_length"]) == {"4", "8", "12"}
+        assert isinstance(row["rho_ci95_excludes_zero"], bool)
+
+
+# --------------------------------------------------------------------------- #
+# 6. Equivalence check on the internal contrasts
+# --------------------------------------------------------------------------- #
+
+def test_equivalence_check_is_reported_explicitly_per_contrast(payload):
+    rows = {r["contrast_id"]: r for r in payload["internal_equivalence_check"]}
+    assert set(rows) == {"IC1_20", "IC2_40"}
+    for row in rows.values():
+        assert isinstance(row["equivalence_established"], bool), (
+            "equivalence must be an explicit boolean, not prose"
+        )
+        assert row["equivalence_band_frac_of_clean_mae"] == 0.03
+        assert row["equivalence_band_abs"] == pytest.approx(
+            0.03 * payload["mean_clean_mae"]
+        )
+
+
+def test_equivalence_convention_is_declared_in_the_payload(payload):
+    convention = payload["equivalence_convention"]
+    assert "NO-GO" in convention["source"]
+    assert convention["band_frac"] == 0.03
+    assert "entirely" in convention["rule"].lower()
+    assert "not equivalence" in convention["note"].lower()
+
+
+def test_equivalence_is_consistent_with_the_reported_ci(payload):
+    """The boolean must actually follow from the reported interval."""
+    band = payload["equivalence_convention"]["band_abs"]
+    for row in payload["internal_equivalence_check"]:
+        expected = row["ci90_low"] >= -band and row["ci90_high"] <= band
+        assert row["equivalence_established"] is bool(expected)

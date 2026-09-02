@@ -168,11 +168,14 @@ no decision function, and every row it writes carries
 | File | Rows | Contents |
 |---|---|---|
 | `internal_primary_contrasts.csv` | 2 | `IC1_20` (20%, d=64 − d=256) and `IC2_40` (40%, d=48 − d=192), in the same column format as `contrast_results.csv` |
+| `boundary_jump_contrasts.csv` | 2 | `BJ1_20` (20%, d=0 − d=64) and `BJ2_40` (40%, d=0 − d=48), **directly bootstrapped** from per-origin paired values, plus the top-5% origin share |
+| `internal_equivalence_check.csv` | 2 | `equivalence_established` (bool) per internal contrast, under the preregistered NO-GO band |
 | `internal_pairwise_contrasts.csv` | 12 | All 6 pairwise internal contrasts per rate, Holm-corrected within rate |
 | `internal_trend_slopes.csv` | 2 | Across-origin mean OLS slope of paired-diff-from-clean against `d`, per rate, with 95%/90% CIs and per-block-length sensitivity |
 | `per_origin_trend_slopes.csv` | 178 | The per-origin slopes the above aggregates |
 | `trailing_boundary_d0.csv` | 2 | `d=0` per rate, under `position_kind: trailing_boundary_condition` |
-| `confounder_difference_correlations.csv` | 8 | ρ(ΔMAE, Δz) for 2 contrasts × 4 pre-specified confounders, with status typing |
+| `confounder_difference_correlations.csv` | 8 | ρ(ΔMAE, Δz) vs. the **boundary-jump** contrasts, Δz = z(d=0) − z(nearest internal); status typing, parametric p-value **and** bootstrap CI on ρ |
+| `confounder_difference_internal_contrasts.csv` | 8 | The same against the internal variation (`IC1_20`/`IC2_40`). **Retained and relabelled** — association with the small internal-position variation, *not* a test of what drives the boundary jump |
 | `internal_only_analysis.json` | — | All of the above plus the Holm family declarations |
 
 ### `position_kind`
@@ -207,3 +210,50 @@ neither merged into any of them nor re-corrected. Declared explicitly under
 | `invalid_input` | A non-finite Δz or ΔMAE. Δz is a real difference of real per-origin values, so this indicates **a data problem** and is surfaced, never silently zeroed. | No |
 | `false` | Evaluated; Holm did not reject. | Yes |
 | `true` | Evaluated; Holm rejected. | Yes |
+
+
+### Why `BJ1_20` / `BJ2_40` are bootstrapped directly
+
+The boundary jump could be obtained by subtracting two already-bootstrapped
+contrasts (`C1_loc_20 − IC1_20`). That is valid for the **point estimate** —
+the operation is linear — but **not for the interval**: both contrasts are
+measured on the same 178 origins, so their difference's sampling distribution
+carries covariance that differencing two separately drawn intervals discards.
+
+`boundary_jump_contrasts.csv` therefore carries two explicit flags:
+
+| Column | Value | Meaning |
+|---|---|---|
+| `directly_bootstrapped` | `True` | Bootstrapped from the per-origin paired MAE values at the two conditions |
+| `derived_by_subtracting_other_contrasts` | `False` | Not obtained from other contrasts' outputs |
+
+### Bootstrap CI on ρ
+
+`confounder_difference_correlations.csv` reports **both**:
+
+| Column | Meaning |
+|---|---|
+| `p_value` | Parametric Spearman p-value — assumes independent observations |
+| `holm_adjusted_p`, `holm_rejects`, `status` | Holm within that contrast's 4-item family, on the parametric p-value |
+| `rho_ci95_low` / `rho_ci95_high` | Moving-block bootstrap CI on ρ at the main block length |
+| `rho_ci95_excludes_zero` | Whether that interval excludes zero |
+| `rho_bootstrap_by_block_length` | The interval at block lengths 4, 8 and 12 |
+
+Evaluation origins are **not** independent (stride 96 < context 320), so the
+parametric p-value must never stand alone. The two can disagree — a Holm
+`false` alongside a bootstrap CI excluding zero is a signal worth reporting,
+not a contradiction to resolve by picking whichever is preferred.
+
+### Equivalence: `internal_equivalence_check.csv`
+
+Non-significance is not equivalence. Equivalence is established here only by the
+preregistered NO-GO convention: the **90% CI must lie entirely within ±3% of
+mean clean MAE** (`decision.no_go.equivalence_band_frac_of_clean_mae`). That
+threshold has a single definition in `stats/decision.py`; a test asserts the
+literal is not copied into the analysis module.
+
+| Column | Meaning |
+|---|---|
+| `equivalence_band_frac_of_clean_mae` / `equivalence_band_abs` | The band, from the NO-GO rule |
+| `ci90_low` / `ci90_high` | The contrast's uncorrected 90% CI |
+| `equivalence_established` | Explicit boolean — `False` means non-significance only |
