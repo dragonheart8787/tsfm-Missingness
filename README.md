@@ -88,6 +88,21 @@ what it produced at the time and must stay intact:
 No model inference is involved. Writing over a `decision.json` produced under a
 different `decision_rule_version` is refused unless you pass `--allow-overwrite`.
 
+### Post-hoc exploratory: internal-only block-proximity analysis
+
+Re-analyses the completed run restricted to the **internal** block positions
+(d > 0), where the nearest real observation is always exactly 1 step back — so
+effective forecast distance is held constant. `d=0` is reported separately as a
+trailing-boundary condition and never pooled in.
+
+```bash
+.venv/bin/python scripts/analyze_internal_only.py --run-dir results/pilot_v1
+```
+
+Writes to `results/pilot_v1/post_hoc_internal_only_analysis/`. No model
+inference, no GPU. **Post-hoc and exploratory: not preregistered, and it feeds
+no GO/PIVOT/NO-GO decision function.** See `report/audit_report.md` §9.
+
 ### Unattended execution
 
 ```bash

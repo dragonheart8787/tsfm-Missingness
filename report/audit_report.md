@@ -135,7 +135,7 @@ alternatives are live, and they are not mutually exclusive:
 
 | # | Alternative explanation | Can this pilot's diagnostics distinguish it? |
 |---|---|---|
-| 1 | **Effective forecast distance.** With the last 64 (or 128) observations removed, the model's nearest real observation is 64 (128) steps further from the forecast, so it is effectively forecasting a longer horizon. | **No.** This is inseparable from block position by construction — moving the block toward the boundary *is* increasing the effective forecast distance. The diagnostics record `nearest_missing_to_boundary` and `trailing_run_length`, which quantify it, but the design cannot break the confound. This is the single most important limitation of the location contrast. |
+| 1 | **Effective forecast distance.** With the last 64 (or 128) observations removed, the model's nearest real observation is 64 (128) steps further from the forecast, so it is effectively forecasting a longer horizon. | **No.** This is inseparable from block position by construction — moving the block toward the boundary *is* increasing the effective forecast distance. The diagnostics record `nearest_missing_to_boundary` and `trailing_run_length`, which quantify it, but the design cannot break the confound. This is the single most important limitation of the location contrast. **§9 partially addresses this post-hoc** by restricting a re-analysis to the internal positions, where effective forecast distance is constant — but that is an exploratory restriction of the comparison, not a fix to the preregistered contrast. |
 | 2 | **Removed local volatility / level / slope.** The removed segment near the boundary may simply be more informative — higher variance, a stronger trend, a level shift — than a segment 256 steps back. | **Diagnostics recorded, but the automated comparison is NOT EVALUABLE here.** `removed_variance`, `removed_slope`, `removed_abs_diff_mean`, `removed_mean`, `removed_min/max` are recorded per mask and remain available for inspection. The automated "does this confounder out-track distance?" check, however, cannot be run on the preregistered contrasts: each is a fixed two-arm comparison in which distance is constant across all 178 origins, so distance's rank correlation is undefined. See §8.1. Distinguishing these confounders from distance needs a design that varies distance within the comparison. |
 | 3 | **Chronos-2's internal scaling.** Chronos-2 applies a NaN-aware instance normalisation whose location and scale are computed from the *retained* observations only. Removing a boundary block therefore changes the normalisation itself, not just the information content. | **Partially.** `retained_context_mean/std`, `retained_mean_change_frac_of_clean_std` and `retained_std_ratio` are recorded per mask, and `rho_scaling` is a PIVOT trigger. This detects association with the scaling shift; it does not separate "the model was renormalised" from "the model lost information". |
 | 4 | **Patch occupancy / patch position.** Chronos-2 patches the context; a mask that wipes whole patches removes whole tokens, while one that partially fills patches degrades them. | **Largely yes, for the block contrasts.** All ten block positions are asserted to be exactly patch-aligned on the model's real, verified patch grid, so every block arm removes whole patches and `n_patches_partially_missing == 0`. Any nonzero value there is a PIVOT trigger. For the random arms partial-patch occupancy is unavoidable and large — which is precisely part of why C3/C4 are pipeline comparisons. |
@@ -236,7 +236,173 @@ v2 — only which automated checks are permitted to claim they found something.
 
 ---
 
-## 9. Verified facts about Chronos-2 used by this design
+## 9. POST-HOC EXPLORATORY: internal-only block-proximity re-analysis
+
+> **This entire section is post-hoc and exploratory.** It was not part of the
+> original preregistration, it feeds no GO/PIVOT/NO-GO decision function, and it
+> carries no confirmatory weight. It re-analyses data already collected in the
+> completed run — no new forecasts, no new data.
+
+### 9.1 Rationale
+
+The preregistered C1/C2 contrasts compare `d=0` against a far position. That
+conflates two things that move together: block position within the context, and
+**effective forecast distance** — how far back the model's nearest *real*
+observation sits from the forecast start.
+
+| Position | Nearest real observation | Effective forecast distance |
+|---|---|---|
+| `d=0` (block abuts the boundary) | `block_length + 1` steps back — 65 at 20%, 129 at 40% | inflated |
+| `d=64, 128, 192, 256` (20%) | exactly 1 step back | unchanged |
+| `d=48, 96, 144, 192` (40%) | exactly 1 step back | unchanged |
+
+Restricting the analysis to the **internal** positions therefore holds effective
+forecast distance constant, isolating genuine block-proximity variation from
+that confound — the confound §7 row 1 identified as structurally inseparable in
+the preregistered contrasts. It is separable here only because the comparison is
+restricted, not because more data was gathered.
+
+`d=0` is **not discarded**. It is reported separately in §9.5 as a distinct
+**trailing-boundary condition**, and is never pooled into any internal-position
+statistic. An automated invariant enforces this.
+
+Rates are analysed separately and never pooled. Everything is paired by
+evaluation origin and uses the same moving-block bootstrap already implemented
+(`stats/bootstrap.py`): main block length 8, sensitivity at 4 and 12, 5,000
+replicates, every condition resampled jointly. Nothing was reimplemented.
+
+### 9.2 Multiplicity families
+
+Four **independent** Holm families. The original preregistered family is not
+merged into any of them and is **not re-corrected**.
+
+| Family | Members | Note |
+|---|---|---|
+| `{C1, C2, C3, C4}` | 4 | Original preregistered family — untouched |
+| `{IC1_20, IC2_40}` | 2 | §9.3 primary, new and separate |
+| Pairwise, 20% | 6 | §9.4, corrected within rate |
+| Pairwise, 40% | 6 | §9.4, corrected within rate — two families of 6, never one of 12 |
+| Confounder Δz, per contrast | 4 each | §9.6 — two families of 4, never one of 8 |
+
+### 9.3 Primary: internal-near vs. internal-far
+
+`IC1_20` = 20%, `d=64` − `d=256`. `IC2_40` = 40%, `d=48` − `d=192`.
+
+`PENDING EXECUTION` — populated from
+`results/pilot_v1/post_hoc_internal_only_analysis/internal_primary_contrasts.csv`.
+Reported in the same format as C1–C4: raw MAE difference, % of mean clean MAE,
+Holm-corrected 95% CI, Holm-adjusted p, 90% CI, median paired difference,
+fraction of origins > 0, and sensitivity across bootstrap block lengths 4/8/12.
+
+### 9.4 Secondary: repeated-measures across the four internal positions
+
+**Categorical (diagnostic only, feeds nothing).** All 6 pairwise paired
+contrasts among the internal positions, per rate, Holm-corrected within rate.
+`PENDING EXECUTION` — `internal_pairwise_contrasts.csv`.
+
+**Ordered trend.** Per origin, the OLS slope of paired-difference-from-clean
+against `d` across that origin's four internal positions; then the across-origin
+mean slope bootstrapped with the same machinery. Reported per rate with its 95%
+CI and whether that CI excludes zero. No multiplicity correction is applied —
+this is one descriptive slope per rate, not a test family, and the output says
+so. `PENDING EXECUTION` — `internal_trend_slopes.csv`, with the per-origin
+slopes in `per_origin_trend_slopes.csv`.
+
+*Note on the slope's response variable:* the per-origin clean MAE is a constant
+offset across the four positions, so `slope(MAE_d − MAE_clean)` is identically
+`slope(MAE_d)`. The paired difference is used to keep the response on the same
+scale as everything else reported here; a test pins the equivalence.
+
+### 9.5 The trailing-boundary condition (`d=0`), reported separately
+
+`PENDING EXECUTION` — `trailing_boundary_d0.csv`. Reported per rate with the
+same summary statistics as the internal contrasts, under
+`position_kind: trailing_boundary_condition`, and never pooled with them. The
+underlying numbers are from the original run; only their presentation is new.
+
+### 9.6 Revised confounder diagnostic: two-arm difference correlation
+
+For the primary contrasts only: ρ(ΔMAE, Δz) across the 178 origins, where
+Δz = z(near position) − z(far position) per origin.
+
+This is **well-posed**, and does not suffer the NaN problem that made the
+distance-based check not evaluable (§8.1): Δz genuinely varies across origins
+because the removed content differs by origin, even though the two positions
+being compared are fixed.
+
+The confounder family is **pre-specified**, fixed before any result was
+inspected — the same discipline the rest of the pilot is built on:
+
+* `removed_variance`
+* `removed_slope`
+* `removed_abs_diff_mean`
+* `retained_mean_change_frac_of_clean_std` (the scaling-shift proxy)
+
+Each result carries the same `not_evaluable` / `invalid_input` / `false` /
+`true` status typing introduced in the v1→v2 patch, so this diagnostic cannot
+regress into the NaN-to-zero collapse that was fixed there. Because Δz is a real
+difference of real per-origin values, a non-finite Δz here would indicate an
+actual **data problem**: it is classified `invalid_input` and surfaced, never
+`not_evaluable` and never silently zeroed. `not_evaluable` and `invalid_input`
+results are excluded from the Holm family entirely and can never become `true`.
+
+`PENDING EXECUTION` — `confounder_difference_correlations.csv`.
+
+### 9.7 Rejected alternative: the sliding-forecast-origin design
+
+A previously considered design would have slid the forecast origin forward to
+vary effective forecast distance directly. **It is rejected and no code for it
+exists.**
+
+The reason: sliding the forecast origin changes the target window, the clean
+context, the market/seasonal regime, and the intrinsic difficulty of the target
+*all at once*. Any difference it produced would be attributable to those changes
+as readily as to effective forecast distance. It swaps one confound for another
+rather than isolating anything — and unlike the present confound, the
+substitution is not even visible in the diagnostics.
+
+**Sketch of what a corrected version would require** — documentation only, for a
+future preregistration round, not implemented here:
+
+* a **crossed panel** of multiple fixed anchor blocks × multiple shifted origins;
+* **each shifted-origin cell carrying its own clean control**, so target
+  difficulty is differenced out rather than assumed constant;
+* response `ΔMAE_{block,origin} = MAE_masked − MAE_clean`, i.e. always measured
+  against that cell's own control;
+* **block fixed effects**, so the shifted-origin comparison is made within
+  anchor block rather than across blocks.
+
+That design is out of scope for this pilot and is recorded here only so the
+reasoning is not lost.
+
+### 9.8 Outputs
+
+All in `results/pilot_v1/post_hoc_internal_only_analysis/`. Nothing under
+`results/pilot_v1/` that existed before is read-modified or overwritten —
+`decision.json`, `analysis.json` and `post_hoc_reanalysis_v2/` are untouched,
+and a test enforces that the analysis writes nothing into the run directory.
+
+| File | Contents |
+|---|---|
+| `internal_primary_contrasts.csv` | IC1_20, IC2_40 — §9.3 |
+| `internal_pairwise_contrasts.csv` | 12 rows, 6 per rate — §9.4 |
+| `internal_trend_slopes.csv` | Mean trend slope and CIs, per rate — §9.4 |
+| `per_origin_trend_slopes.csv` | 178 per-origin slopes per rate |
+| `trailing_boundary_d0.csv` | `d=0`, separately labelled — §9.5 |
+| `confounder_difference_correlations.csv` | ρ(ΔMAE, Δz) with status typing — §9.6 |
+| `internal_only_analysis.json` | All of the above plus the family declarations |
+
+### 9.9 Interpretation
+
+Deliberately not offered here. The three-branch reading of these numbers — does
+an internal-only effect hold at both rates; is `d=0` the only condition that
+degrades; is any apparent effect driven by a handful of origins or by
+removed-content differences — is a judgement for the Research Lead, not
+something this pilot encodes as a second automated classifier.
+
+---
+
+## 10. Verified facts about Chronos-2 used by this design
 
 Read from `chronos-forecasting` 2.3.1 source on the build host, and re-verified
 against the loaded checkpoint at run time by `scripts/verify_model_contract.py`
@@ -281,7 +447,7 @@ adjustment — every d value would need recomputing on a different grid.
 
 ---
 
-## 10. Integrity guarantees, and how each is enforced
+## 11. Integrity guarantees, and how each is enforced
 
 | Guarantee | Enforcement |
 |---|---|
@@ -299,7 +465,7 @@ adjustment — every d value would need recomputing on a different grid.
 
 ---
 
-## 11. Scope
+## 12. Scope
 
 Implemented exactly as specified. Deliberately **not** implemented, and not to
 be added without a Research Lead decision: 10% missingness; periodic

@@ -151,3 +151,59 @@ inside `decision.criteria.pivot`), alongside — not instead of — the raw
 under a *different* rule version raises `FileExistsError` unless
 `allow_overwrite=True`. For a post-hoc re-analysis, point `--out-dir` at a
 separate directory so the original run's preregistered outputs stay intact.
+
+
+---
+
+## Post-hoc exploratory: internal-only analysis
+
+Written to `results/<run>/post_hoc_internal_only_analysis/` by
+`scripts/analyze_internal_only.py`. Reads the run's existing
+`window_results.csv` and `mask_diagnostics.csv`; no model inference.
+
+**This analysis is post-hoc and exploratory.** It was not preregistered, feeds
+no decision function, and every row it writes carries
+`analysis_kind: post_hoc_exploratory` plus a `note` saying so.
+
+| File | Rows | Contents |
+|---|---|---|
+| `internal_primary_contrasts.csv` | 2 | `IC1_20` (20%, d=64 − d=256) and `IC2_40` (40%, d=48 − d=192), in the same column format as `contrast_results.csv` |
+| `internal_pairwise_contrasts.csv` | 12 | All 6 pairwise internal contrasts per rate, Holm-corrected within rate |
+| `internal_trend_slopes.csv` | 2 | Across-origin mean OLS slope of paired-diff-from-clean against `d`, per rate, with 95%/90% CIs and per-block-length sensitivity |
+| `per_origin_trend_slopes.csv` | 178 | The per-origin slopes the above aggregates |
+| `trailing_boundary_d0.csv` | 2 | `d=0` per rate, under `position_kind: trailing_boundary_condition` |
+| `confounder_difference_correlations.csv` | 8 | ρ(ΔMAE, Δz) for 2 contrasts × 4 pre-specified confounders, with status typing |
+| `internal_only_analysis.json` | — | All of the above plus the Holm family declarations |
+
+### `position_kind`
+
+Every row carries one of two values, and they are never mixed in an aggregate:
+
+| Value | Meaning |
+|---|---|
+| `internal_positions` | d > 0. The nearest real observation is exactly 1 step back, so effective forecast distance is constant across these positions. |
+| `trailing_boundary_condition` | d = 0. The block abuts the forecast boundary, so the nearest real observation is `block_length + 1` steps back. Reported separately; **never pooled** into an internal-position statistic. |
+
+### Holm families
+
+Four independent families; the original preregistered `{C1,C2,C3,C4}` family is
+neither merged into any of them nor re-corrected. Declared explicitly under
+`holm_families` in `internal_only_analysis.json`.
+
+| Family key | Size |
+|---|---|
+| `internal_primary` | 2 — `{IC1_20, IC2_40}` |
+| `internal_pairwise_per_rate["20"]` / `["40"]` | 6 each — two families, never one of 12 |
+| `confounder_difference_per_contrast[...]` | 4 each — two families, never one of 8 |
+| `original_preregistered_family_not_recorrected` | recorded for reference only |
+
+### Confounder-difference status typing
+
+`confounder_difference_correlations.csv` reuses the v2 status vocabulary:
+
+| Status | Meaning | Counts toward Holm? |
+|---|---|---|
+| `not_evaluable` | Δz is constant across origins. Should not occur here by construction. | No |
+| `invalid_input` | A non-finite Δz or ΔMAE. Δz is a real difference of real per-origin values, so this indicates **a data problem** and is surfaced, never silently zeroed. | No |
+| `false` | Evaluated; Holm did not reject. | Yes |
+| `true` | Evaluated; Holm rejected. | Yes |
