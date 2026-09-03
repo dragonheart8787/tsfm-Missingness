@@ -6,12 +6,12 @@ Steps 2 and 4 are **hard stops**: if either fails, stop and report. Do not
 select a tolerance after seeing a discrepancy — a mismatch is a stop, not a
 tuning problem.
 
-**Execution commit (F): `<FROZEN_COMMIT_F2>`** — the implementation freeze. This
+**Execution commit (F2): `120ea3ada99121c2503dc85ac623f6af13a5e143`** — the implementation freeze. This
 is what step 1 checks out and what the run manifest must record as executed.
 
-This runbook ships in a later documentation commit (D), which names F above.
-**D is never the executed commit.** If `git rev-parse HEAD` during the run does
-not equal F, stop: the manifest would otherwise attribute results to the wrong
+This runbook ships in a later documentation commit (D2), which names F2 above.
+**D2 is never the executed commit.** If `git rev-parse HEAD` during the run does
+not equal F2, stop: the manifest would otherwise attribute results to the wrong
 tree.
 
 ---
@@ -22,9 +22,9 @@ tree.
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/chronos2-missingness-pilot-xwx5y7
-git checkout <FROZEN_COMMIT_F2>    # F, the implementation-freeze commit
+git checkout 120ea3ada99121c2503dc85ac623f6af13a5e143    # F2, the implementation-freeze commit
 git status --porcelain            # must print nothing
-git rev-parse HEAD                # must equal F; record it in the run manifest
+git rev-parse HEAD                # must equal F2; record it in the run manifest
 
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python torch --torch-backend cu124
@@ -98,7 +98,7 @@ echo "guard exit status: $?    # 0 = safe to proceed, 1 = HARD STOP"
 **This guard applies at INITIALIZATION ONLY.** Once step 3 has created the
 directory, it is the correct one: step 5's full-matrix pass and every
 interruption-recovery resume must continue using **that same directory** and the
-**same execution commit F**. Do not re-run this guard before step 5 or before a
+**same execution commit F2**. Do not re-run this guard before step 5 or before a
 resume — resumption at origin × condition granularity is the intended behavior
 there, and re-running the guard would wrongly block it.
 
