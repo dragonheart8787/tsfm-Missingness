@@ -6,7 +6,7 @@ Steps 2 and 4 are **hard stops**: if either fails, stop and report. Do not
 select a tolerance after seeing a discrepancy — a mismatch is a stop, not a
 tuning problem.
 
-Frozen commit: **`<FROZEN_COMMIT>`** (see Section 7 of the completion report).
+Frozen commit: **`e4184cb`** (see Section 7 of the completion report).
 
 ---
 
@@ -16,7 +16,7 @@ Frozen commit: **`<FROZEN_COMMIT>`** (see Section 7 of the completion report).
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/chronos2-missingness-pilot-xwx5y7
-git checkout <FROZEN_COMMIT>
+git checkout e4184cb
 git status --porcelain          # must print nothing
 
 uv venv --python 3.11 .venv
