@@ -6,7 +6,7 @@ Steps 2 and 4 are **hard stops**: if either fails, stop and report. Do not
 select a tolerance after seeing a discrepancy — a mismatch is a stop, not a
 tuning problem.
 
-**Execution commit (F): `<FROZEN_COMMIT_F>`** — the implementation freeze. This
+**Execution commit (F): `e49c5402ff6037c52469c1d848460fb08ad9c6de`** — the implementation freeze. This
 is what step 1 checks out and what the run manifest must record as executed.
 
 This runbook ships in a later documentation commit (D), which names F above.
@@ -22,7 +22,7 @@ tree.
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/chronos2-missingness-pilot-xwx5y7
-git checkout <FROZEN_COMMIT_F>    # F, the implementation-freeze commit
+git checkout e49c5402ff6037c52469c1d848460fb08ad9c6de    # F, the implementation-freeze commit
 git status --porcelain            # must print nothing
 git rev-parse HEAD                # must equal F; record it in the run manifest
 
