@@ -45,7 +45,27 @@ model:
   # PREREGISTERED-BY-PIN: the exact commit hash of the Hugging Face repo that
   # was loaded. `null` means "not yet pinned" and the runner REFUSES to run.
   # Populate via: python scripts/verify_model_contract.py --write-revision
-  revision: null
+  #
+  # PROVENANCE: this hash was TRANSCRIBED from the Research Lead's report of the
+  # original pilot's GPU-host verification, not resolved in the environment that
+  # wrote this line. It is safe to transcribe because it is verified rather than
+  # trusted: Chronos2Forecaster loads this exact revision and
+  # scripts/verify_model_contract.py re-reads the patch grid and quantiles off
+  # the loaded checkpoint, so a wrong hash fails loudly at load time instead of
+  # silently producing results against the wrong weights.
+  # Re-run `--write-revision` on the host to replace a transcription with a
+  # measurement.
+  revision: "29ec3766d36d6f73f0696f85560a422f50e8498c"
+  # Contract values measured on the GPU host for the revision above. Re-verified
+  # at load time by verify_contract(); recorded here so a drift is visible in
+  # the diff rather than only in a run manifest.
+  verified_contract:
+    input_patch_size: 16
+    input_patch_stride: 16
+    output_patch_size: 16
+    max_output_patches: 64
+    single_shot_horizon: 1024      # max_output_patches * output_patch_size
+    verified_on: "original pilot GPU-host run"
   device: "auto"             # "auto" | "cuda" | "cpu"
   dtype: "float32"           # float32 unless the runtime genuinely forces otherwise
   # Explicit median. We select the q=0.5 column of the model's own trained

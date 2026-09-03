@@ -551,3 +551,86 @@ def test_classification_is_deterministic_and_serialisable(gap_config, config):
     b = classify(_inputs(gaps, gap_config, config))
     assert a.label == b.label and a.triggers == b.triggers
     assert json.dumps(a.as_dict(), default=str) == json.dumps(b.as_dict(), default=str)
+
+
+# --------------------------------------------------------------------------- #
+# Verified capacity of the pinned checkpoint — g=128 executability
+# --------------------------------------------------------------------------- #
+
+def test_verified_contract_capacity_covers_the_whole_matrix(config, gap_config):
+    """The pinned revision's measured capacity vs. this matrix's largest request.
+
+    Values are the GPU-host measurement recorded in configs/pilot_config.yaml
+    under model.verified_contract, re-checked at load time by verify_contract().
+    """
+    recorded = config["model"]["verified_contract"]
+    capacity = recorded["max_output_patches"] * recorded["output_patch_size"]
+    assert capacity == recorded["single_shot_horizon"] == 1024
+
+    H = int(config["design"]["horizon"])
+    largest = H + max(int(g) for g in gap_config["design"]["gap_lengths"])
+    assert largest == 224
+    assert largest <= capacity, "the matrix would require autoregressive unrolling"
+
+
+def test_no_gap_reaches_the_unroll_threshold_on_the_pinned_checkpoint(config, gap_config):
+    """Mirrors Chronos2Pipeline._predict_batch's own patch arithmetic.
+
+    get_num_output_patches(r) = min(ceil(r / output_patch_size), max_output_patches).
+    Unrolling happens only when the first step leaves `remaining > 0`.
+    """
+    import math
+
+    recorded = config["model"]["verified_contract"]
+    H = int(config["design"]["horizon"])
+    for g in gap_config["design"]["gap_lengths"]:
+        requested = H + int(g)
+        patches = min(
+            math.ceil(requested / recorded["output_patch_size"]),
+            recorded["max_output_patches"],
+        )
+        covered = patches * recorded["output_patch_size"]
+        assert covered >= requested, f"g={g} would leave {requested - covered} steps to unroll"
+
+
+def test_preflight_passes_against_the_recorded_contract(config, gap_config):
+    """Preflight on a contract built from the recorded measurement, not the mock."""
+    recorded = config["model"]["verified_contract"]
+    real = _contract(
+        input_patch_size=recorded["input_patch_size"],
+        input_patch_stride=recorded["input_patch_stride"],
+        output_patch_size=recorded["output_patch_size"],
+        max_output_patches=recorded["max_output_patches"],
+        model_prediction_length=recorded["single_shot_horizon"],
+        revision=config["model"]["revision"],
+    )
+    assert preflight(
+        contract=real,
+        context_length=int(config["design"]["context_length"]),
+        horizon=int(config["design"]["horizon"]),
+        gap_lengths=[int(g) for g in gap_config["design"]["gap_lengths"]],
+        internal_block_distance=int(gap_config["design"]["internal_block_distance"]),
+    ) == []
+
+
+def test_pinned_revision_is_a_full_commit_hash(config):
+    revision = config["model"]["revision"]
+    assert isinstance(revision, str) and len(revision) == 40
+    assert all(c in "0123456789abcdef" for c in revision), "not a hex commit hash"
+
+
+def test_contract_drift_from_the_recorded_values_is_a_violation(config):
+    """A pin alone does not prove the checkpoint still reports what it reported."""
+    from model.chronos2_runner import verify_contract
+
+    drifted = _contract(max_output_patches=8, model_prediction_length=8 * 16)
+    violations = verify_contract(drifted, config)
+    assert any("CONTRACT DRIFT" in v for v in violations)
+    assert any("max_output_patches" in v for v in violations)
+    assert any("single-shot horizon" in v for v in violations)
+
+    matching = _contract(
+        max_output_patches=config["model"]["verified_contract"]["max_output_patches"],
+        model_prediction_length=config["model"]["verified_contract"]["single_shot_horizon"],
+    )
+    assert verify_contract(matching, config) == []

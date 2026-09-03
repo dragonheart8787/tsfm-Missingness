@@ -100,9 +100,9 @@ reconstructs the naive design alongside the corrected one and asserts their
 scored windows differ by exactly `g` at both ends — demonstrating the bug is
 real rather than asserting the fix looks right.
 
-### 3.2 The long-horizon hazard — a genuine open risk
+### 3.2 The long-horizon hazard — RESOLVED, hard stop retained
 
-**FROZEN as a hard stop. The outcome is UNKNOWN until verified on the model.**
+**FROZEN as a hard stop. Capacity RESOLVED: the matrix fits single-shot.**
 
 `H+g` must fit in the model's **single-shot** output,
 `max_output_patches × output_patch_size`. `Chronos2Pipeline.predict` only
@@ -111,21 +111,38 @@ defaults to `False`) and then silently falls back to
 `_autoregressive_unroll_for_long_horizon` — a different inference regime, and a
 contract violation under the original pilot's rules.
 
-At `g=128` this asks for **224 steps**. Whether the real checkpoint can serve
-that single-shot is **not known from this environment** and must be verified
-before any GPU time:
+At `g=128` this asks for **224 steps**.
 
-```bash
-python scripts/verify_model_contract.py        # prints max_output_patches, output_patch_size
-```
+**Resolved.** The original pilot's real-weights verification
+(`scripts/verify_model_contract.py`, run on the GPU host against revision
+`29ec3766d36d6f73f0696f85560a422f50e8498c`) reported
+`max_output_patches: 64`, `output_patch_size: 16`, giving a single-shot capacity
+of **1,024 steps**. The largest request in this matrix is `H+g = 224` at
+`g=128`, comfortably inside it.
 
-If `max_output_patches × output_patch_size < 224`, **`g=128` is not executable
-as specified** and this document requires an amendment — dropping that gap
-length, or accepting unrolling as a documented regime change with its own
-justification. `experiments/trailing_gap.preflight()` raises
-`TrailingGapContractViolation` naming the offending gap rather than proceeding,
-and the pipeline is additionally called with `limit_prediction_length=True` so
-the library raises instead of warning.
+Confirmed against the library's control flow, not the arithmetic alone.
+`Chronos2Pipeline._predict_batch` computes
+`get_num_output_patches(remaining) = min(ceil(remaining / output_patch_size), max_output_patches)`.
+For 224 steps that is `min(ceil(224/16), 64) = min(14, 64) = 14` patches = 224
+steps, all produced by the **first** `_predict_step`, leaving `remaining = 0`.
+The `if remaining > 0` branch that would enter
+`_prepare_inputs_for_long_horizon_unrolling` is therefore never taken. **No
+autoregressive unrolling occurs at any gap length in this matrix.**
+
+| `g` | `H+g` | Output patches | Single-shot capacity | Unrolls? |
+|---|---|---|---|---|
+| 16 | 112 | 7 | 1,024 (64 × 16) | no |
+| 32 | 128 | 8 | 1,024 | no |
+| 64 | 160 | 10 | 1,024 | no |
+| 128 | **224** | **14** | 1,024 | **no** |
+
+**The hard stop is retained regardless.** The capacity is a property of the
+checkpoint, and revisions can drift. `experiments/trailing_gap.preflight()`
+still raises `TrailingGapContractViolation` naming the offending gap if the
+loaded contract cannot serve the request, and the pipeline is still called with
+`limit_prediction_length=True` so the library raises instead of warning. A cheap
+re-verification on the GPU host remains a precondition (§10) — it costs seconds
+and the value above was measured on a different day.
 
 ---
 
@@ -289,8 +306,11 @@ and whether `INCONCLUSIVE` should be split by *why* it was inconclusive.
 **FROZEN as requirements. None performed yet.**
 
 1. **Re-verify the model contract.** `python scripts/verify_model_contract.py`,
-   confirming the pinned revision, the patch grid, and — critically — the
-   single-shot horizon limit against §3.2.
+   confirming the pinned revision, the patch grid, and the single-shot horizon
+   limit against §3.2. Expected, from the original pilot's verification:
+   `revision: 29ec3766d36d6f73f0696f85560a422f50e8498c`, `input_patch_size: 16`, `input_patch_stride: 16`,
+   `output_patch_size: 16`, `max_output_patches: 64` → capacity 1,024. Any
+   departure means §3.2 must be re-derived before the run, not during it.
 2. **Re-run `clean` and audit it against the original pilot.** Before any new
    result is trusted, the clean condition must be re-run and its predictions
    checksum/tolerance-audited against the original pilot's clean predictions, to
@@ -320,6 +340,10 @@ otherwise delivered to the reviewer**, not merely produced:
 
 Raw per-forecast files may stay uncommitted. **Summaries may not.**
 
+This requirement has been generalised repo-wide as
+`docs/results_delivery_policy.md`, so it applies to every execution round and
+not only to this experiment.
+
 ---
 
 ## 11. Referenced gating tests
@@ -347,7 +371,8 @@ All in `tests/test_trailing_gap.py`, all passing, all model-mocked:
 | Hypothesis provenance statement (§0) | **FROZEN** |
 | Conditions and `internal_block` at `d=16` (§2) | **FROZEN** |
 | Corrected `truncated_long(g)` (§3) | **FROZEN** |
-| Unrolling as a hard stop (§3.2) | **FROZEN** — but whether `g=128` is executable is **UNVERIFIED** |
+| Unrolling as a hard stop (§3.2) | **FROZEN** |
+| `g=128` executability (§3.2) | **RESOLVED** — capacity 1,024 vs. a 224-step maximum; cheap re-verification retained as a precondition |
 | Matrix, 2,314 forecasts (§4) | **FROZEN** |
 | `R_g` / `B_g` definitions and Holm families (§5) | **FROZEN** |
 | `R_g` interpretation readings (§5.1) | **AWAITING SIGN-OFF** |

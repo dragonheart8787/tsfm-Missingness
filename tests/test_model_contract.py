@@ -21,8 +21,10 @@ def _contract(**overrides) -> ModelContract:
         input_patch_stride=16,
         output_patch_size=16,
         model_context_length=8192,
-        max_output_patches=8,
-        model_prediction_length=1024,
+        # Matches configs/pilot_config.yaml model.verified_contract, and is
+        # self-consistent: 64 * 16 == 1024, as the real pipeline computes it.
+        max_output_patches=64,
+        model_prediction_length=64 * 16,
         quantiles=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         use_arcsinh=False,
         device="cpu",

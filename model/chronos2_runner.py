@@ -212,6 +212,30 @@ def verify_contract(contract: ModelContract, config: dict[str, Any]) -> list[str
             f"(patch_size={contract.input_patch_size}); Chronos-2 would LEFT-PAD the context "
             f"with NaN, shifting every block position relative to the patch grid."
         )
+    # Drift check against the values measured on the GPU host for the pinned
+    # revision. A pin alone does not prove the checkpoint still reports what it
+    # reported: this makes a change visible immediately rather than at analysis
+    # time, and is what lets the recorded capacity be relied on downstream.
+    recorded = model_cfg.get("verified_contract") or {}
+    for field in (
+        "input_patch_size", "input_patch_stride", "output_patch_size", "max_output_patches"
+    ):
+        if field in recorded and getattr(contract, field) != int(recorded[field]):
+            violations.append(
+                f"CONTRACT DRIFT: checkpoint reports {field}={getattr(contract, field)}, but "
+                f"model.verified_contract records {recorded[field]} for pinned revision "
+                f"{contract.revision}. The recorded value is what downstream designs were "
+                f"sized against; re-verify before running."
+            )
+    if "single_shot_horizon" in recorded:
+        actual = contract.max_output_patches * contract.output_patch_size
+        if actual != int(recorded["single_shot_horizon"]):
+            violations.append(
+                f"CONTRACT DRIFT: single-shot horizon is {actual} "
+                f"({contract.max_output_patches} x {contract.output_patch_size}), but "
+                f"model.verified_contract records {recorded['single_shot_horizon']}."
+            )
+
     horizon = int(design["horizon"])
     if horizon > contract.model_prediction_length:
         violations.append(

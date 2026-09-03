@@ -53,7 +53,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 # 2. Dataset (already validated; re-runs are idempotent)
 .venv/bin/python data/fetch_etth1.py --config configs/pilot_config.yaml
 
-# 3. Tests — 209 non-model tests + 3 real-model tests (require GPU/model access) = 212 total.
+# 3. Tests — 214 non-model tests + 3 real-model tests (require GPU/model access) = 217 total.
 #    The non-model tests all pass on CPU with the model mocked at the
 #    inference boundary; the 3 real-model tests need weights.
 .venv/bin/python -m pytest tests/ -v -m "not requires_model"
@@ -145,12 +145,15 @@ runner/                     windows.py (read-only targets), run_pilot.py (resuma
 scripts/                    verify_model_contract.py, analyze_run.py, make_figures.py
 experiments/trailing_gap.py draft next-round conditions (NOT executed)
 stats/mechanism_decision.py draft mechanism rule (NOT authoritative)
-tests/                      209 non-model + 3 real-model (requires_model) = 212
+tests/                      214 non-model + 3 real-model (requires_model) = 217
 report/audit_report.md      interpretation-discipline report
 docs/                       ENVIRONMENT.md, SCHEMA.md
 ```
 
-`results/` is gitignored; only summaries are committed.
+`results/` is gitignored; only summaries are committed — and per
+[`docs/results_delivery_policy.md`](docs/results_delivery_policy.md), summaries
+**must** reach the reviewer after any execution round. Raw per-forecast files may
+stay uncommitted; summaries may not.
 
 ## Documentation
 
