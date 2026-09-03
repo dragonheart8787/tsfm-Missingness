@@ -542,3 +542,106 @@ def test_the_disclaimer_travels_with_the_dose_response(gap_config, config):
     assert "NOT flatness" in stated
     assert "NOT equivalence" in stated
     assert "sub-question" in decision.criteria["dose_response_note"].lower()
+
+
+# =========================================================================== #
+# Approved-item additions
+# =========================================================================== #
+
+def test_hypothesis_provenance_on_every_possible_classification_output(
+    gap_config, config
+):
+    """Not a sample: every reachable label and every INCONCLUSIVE reason.
+
+    The provenance framing is §0 of the preregistration — that R_g/B_g test a
+    hypothesis generated from a post-hoc finding, one level removed from an
+    independent confirmatory test. It must survive on every output, because the
+    output is what a reader sees.
+    """
+    from stats.mechanism_decision import (
+        CONSISTENT_LOWER_ERROR, CONSISTENT_PENALTY, DIRECTION_REVERSAL,
+        INCONCLUSIVE, NO_MATERIAL_DIFFERENCE,
+    )
+
+    cases = {
+        DIRECTION_REVERSAL: [
+            _material_positive("R_16", 16), _material_positive("R_32", 32),
+            _material_positive("R_64", 64), _material_negative("R_128", 128),
+        ],
+        NO_MATERIAL_DIFFERENCE: [_equivalent(f"R_{g}", g) for g in GAPS],
+        CONSISTENT_PENALTY: [
+            _material_positive("R_16", 16), _material_positive("R_32", 32),
+            _material_positive("R_64", 64), _unresolved("R_128", 128),
+        ],
+        CONSISTENT_LOWER_ERROR: [
+            _material_negative("R_16", 16), _material_negative("R_32", 32),
+            _material_negative("R_64", 64), _unresolved("R_128", 128),
+        ],
+        f"{INCONCLUSIVE}:{REASON_SPARSE}": [
+            _material_positive("R_16", 16), _equivalent("R_32", 32),
+            _equivalent("R_64", 64), _equivalent("R_128", 128),
+        ],
+        f"{INCONCLUSIVE}:{REASON_MIXED}": [
+            _unresolved("R_16", 16), _equivalent("R_32", 32),
+            _equivalent("R_64", 64), _equivalent("R_128", 128),
+        ],
+        f"{INCONCLUSIVE}:{REASON_INSUFFICIENT}": [_unresolved(f"R_{g}", g) for g in GAPS],
+    }
+
+    seen_labels, seen_reasons = set(), set()
+    for expected, gaps in cases.items():
+        decision = classify(_inputs(gaps, gap_config, config))
+        label = (
+            f"{decision.label}:{decision.reason}"
+            if decision.label == INCONCLUSIVE else decision.label
+        )
+        assert label == expected, f"{expected}: got {label}"
+        seen_labels.add(decision.label)
+        if decision.reason:
+            seen_reasons.add(decision.reason)
+
+        provenance = decision.criteria["hypothesis_provenance"]
+        assert "POST-HOC" in provenance, f"{expected}: POST-HOC missing"
+        assert "one level" in provenance, f"{expected}: 'one level removed' missing"
+        assert "removed from a fully independent confirmatory test" in provenance
+        # Present in the serialised form a reader actually receives.
+        assert "POST-HOC" in json.dumps(decision.as_dict(), default=str)
+
+    # Every label and every reason the rule can emit was exercised.
+    assert seen_labels == {
+        DIRECTION_REVERSAL, NO_MATERIAL_DIFFERENCE, CONSISTENT_PENALTY,
+        CONSISTENT_LOWER_ERROR, INCONCLUSIVE,
+    }
+    assert seen_reasons == {REASON_SPARSE, REASON_MIXED, REASON_INSUFFICIENT}
+
+
+def test_sesoi_delta_follows_a_mutated_pilot_config(config):
+    """Inheritance is real, not two values that happen to agree.
+
+    Mutating the copied pilot config's SESOI must move sesoi_delta with it. If
+    the rule carried its own copy of 0.03, this would not move.
+    """
+    baseline = sesoi_delta(config, CLEAN_MAE)
+    assert baseline == pytest.approx(0.03 * CLEAN_MAE)
+
+    for mutated_frac in (0.01, 0.05, 0.10, 0.0):
+        mutated = json.loads(json.dumps(config))
+        mutated["decision"]["no_go"]["equivalence_band_frac_of_clean_mae"] = mutated_frac
+        assert sesoi_delta(mutated, CLEAN_MAE) == pytest.approx(mutated_frac * CLEAN_MAE)
+    # The original object is untouched by the mutation.
+    assert sesoi_delta(config, CLEAN_MAE) == pytest.approx(baseline)
+
+
+def test_a_mutated_sesoi_changes_the_per_gap_readings(gap_config, config):
+    """The inherited value really drives classification, not just a number."""
+    # A difference that is MATERIAL_POSITIVE under a 3% band...
+    gaps = [_material_positive(f"R_{g}", g) for g in GAPS]
+    assert classify(_inputs(gaps, gap_config, config)).label == (
+        "CONSISTENT_EXTRA_TRAILING_GAP_PENALTY"
+    )
+    # ...ceases to clear the band when the inherited SESOI is widened.
+    widened = json.loads(json.dumps(config))
+    widened["decision"]["no_go"]["equivalence_band_frac_of_clean_mae"] = 0.50
+    relabelled = classify(_inputs(gaps, gap_config, widened))
+    assert relabelled.label != "CONSISTENT_EXTRA_TRAILING_GAP_PENALTY"
+    assert relabelled.criteria["sesoi_delta"] == pytest.approx(0.50 * CLEAN_MAE)

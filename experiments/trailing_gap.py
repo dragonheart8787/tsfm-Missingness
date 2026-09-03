@@ -1,9 +1,10 @@
 """Trailing-gap mechanism experiment conditions.
 
-    *** DRAFT. NOT EXECUTED. AWAITING RESEARCH LEAD SIGN-OFF. ***
+    *** FROZEN AND PREREGISTERED. NOT YET EXECUTED. ***
 
-No forecasts have been produced under this design. This module builds and
-validates the conditions; it does not run them.
+The design is frozen; execution is gated on the Research Lead's release audit,
+not on any further design decision. No forecasts have been produced under it.
+This module builds and validates the conditions; it does not run them.
 
 The corrected ``truncated_long(g)``
 -----------------------------------

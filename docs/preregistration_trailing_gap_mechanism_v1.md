@@ -1,11 +1,14 @@
 # Preregistration v1 — Trailing-gap mechanism experiment
 
-> **STATUS: DRAFT SUBMITTED FOR RESEARCH LEAD REVIEW. NOT EXECUTED.**
+> **STATUS: FROZEN AND PREREGISTERED. NOT YET EXECUTED.**
 >
-> No forecasts have been produced under this design. No GPU time has been spent.
-> Execution is gated on sign-off of this document. Items below are marked
-> **FROZEN** (fixed by this draft, not to be changed without an amendment) or
-> **AWAITING SIGN-OFF** (a proposal, explicitly not yet decided).
+> Every rule in this document is frozen. No forecasts have been produced under
+> it and no GPU time has been spent; execution is gated on the Research Lead's
+> release audit, not on any further design decision. Nothing below may change
+> without a numbered amendment.
+>
+> Superseded earlier wording is quarantined in Appendix A (§14) and is **not
+> operative**. Nothing outside that appendix describes a proposal.
 
 Supersedes the sketch in `docs/next_round_trailing_gap_mechanism.md`, whose
 `truncated(g)` arm contained a fatal timestamp-misalignment bug (§3.1).
@@ -178,16 +181,24 @@ same target over the same timestamps. They differ **only** in whether the model
 is shown a trailing run of NaNs or handed a shorter context and a longer
 horizon request.
 
-Interpretation — **AWAITING SIGN-OFF** as a set of readings, not yet a decision:
+**FROZEN.** Per-gap classification is **four-way** against
+`delta = 0.03 x mean_clean_mae`:
 
-| Reading | Consistent with |
-|---|---|
-| `R_g` inside the equivalence band | An **effective-horizon-only** story: trailing NaNs cost nothing beyond the lost recency |
-| `R_g > 0`, outside the band | An **extra penalty** specific to the explicit trailing-NaN representation, masking, or position handling |
-| `R_g < 0`, outside the band | The explicit NaN framing **outperforms** the shorter-context/longer-horizon single-shot framing |
+| Reading | Criterion | Interpretation (verbatim, used wherever reported) |
+|---|---|---|
+| `EQUIVALENT` | the complete **90%** equivalence CI lies inside `[-delta, +delta]` | "no practically meaningful performance difference was established... consistent with a horizon-dominant explanation, but does NOT demonstrate an 'effective-horizon-only' mechanism." |
+| `MATERIAL_POSITIVE` | Holm-adjusted CI **lower** bound `> +delta` | "explicit trailing-gap encoding has higher mean error than shorter-context/longer-horizon single-shot forecasting by more than the SESOI. It does not isolate masking, normalization, positional handling, or another internal component." |
+| `MATERIAL_NEGATIVE` | Holm-adjusted CI **upper** bound `< -delta` | "lower error was observed with explicit trailing NaNs. Do not call this a beneficial causal mechanism." |
+| `UNRESOLVED` | everything else | neither equivalence nor a material directional difference was established at this gap length |
 
-"Consistent with" is the strongest available reading. None of these is a
-demonstrated mechanism, and no report may upgrade them to one.
+`ci_low_holm > 0` is **not** sufficient for `MATERIAL_POSITIVE`; the bound must
+clear `+delta`. `UNRESOLVED` explicitly covers: statistically different from
+zero but practical magnitude unresolved; point estimate outside the SESOI while
+the CI overlaps it; and non-significant without equivalence.
+
+Two secondary flags — `statistically_detectable_but_practically_small` and
+`statistically_detectable_but_sesoi_unresolved` — are recorded for diagnostic
+visibility and can never promote a gap to a material directional reading.
 
 ### 5.2 Secondary: the `B_g` family
 
@@ -215,8 +226,12 @@ analysis. The single definition lives at
 `configs/pilot_config.yaml: decision.no_go.equivalence_band_frac_of_clean_mae`,
 read via `stats.decision.equivalence_band()`.
 
-`configs/trailing_gap_config.yaml` does not restate it; tests assert the `0.03`
-literal appears in neither `stats/mechanism_decision.py` nor the new config.
+`configs/trailing_gap_config.yaml` does not restate it. Inheritance is proved
+behaviourally rather than by forbidding a literal: `stats/mechanism_decision.py`
+mentions `0.03` only in a docstring stating the formula, and
+`test_sesoi_delta_follows_a_mutated_pilot_config` mutates the pilot config's
+value and asserts `sesoi_delta` moves with it — so the two cannot be independent
+values that merely happen to agree.
 
 **Equivalence is checked before significance.** A result both statistically
 significant and practically negligible reads as *equivalent*, not as an effect.
@@ -226,7 +241,7 @@ Non-significance alone never establishes equivalence.
 
 ## 7. Dose-response across the four gap lengths
 
-**METHOD FROZEN. THE MONOTONIC-VS-NONLINEAR CHOICE AWAITS SIGN-OFF.**
+**FROZEN.**
 
 Per origin, the OLS slope of `R_g` against `g` across that origin's four gap
 values; then the across-origin mean slope bootstrapped with the same
@@ -234,11 +249,22 @@ moving-block procedure used everywhere else. This mirrors the internal-only
 trend analysis exactly (`stats.internal_only.per_origin_trend_slopes`), so the
 two are directly comparable.
 
-**Proposal, needing sign-off:** test the **linear slope as primary**, and assess
-nonlinearity only as a **secondary descriptive check** (a quadratic term plus
-the per-gap reading pattern already reported in §5.1).
+The slope is computed against **`x = g / patch_size`** — missing patches, not
+raw `g`. Equivalent linearity, interpretable per-patch units.
 
-*Reasoning, offered for the Research Lead to accept or overrule.* An
+The **linear slope is primary for the dose-response SUB-QUESTION ONLY**. It is
+**not** primary evidence for the experiment: the four categorical per-gap `R_g`
+readings of §5.1 are. Nonlinearity is assessed as a **secondary descriptive
+check** only (a quadratic term plus the per-gap reading pattern). Neither the
+slope nor the curvature feeds the classification of §9, and equivalence is
+decided **only** from the four per-gap CIs.
+
+**A non-significant slope means only "no detected linear trend."** It does not
+mean the relationship is flat, does not establish equivalence, and does not
+support an effective-horizon-only explanation. A static test enforces that no
+part of this codebase characterises it otherwise.
+
+*Reasoning recorded for the audit trail.* An
 effective-horizon-only story predicts `R_g ≈ 0` at every `g` — a flat line, and
 the linear test is the sharpest instrument against it. A representation-specific
 penalty most plausibly grows with the number of unobserved trailing patches,
@@ -250,12 +276,13 @@ pattern qualitatively — and the classification rule treats direction
 disagreement across gaps as `INCONSISTENT_ACROSS_GAPS` rather than averaging it
 away.
 
-**The counter-argument the Research Lead should weigh:** if the effect is a
+**The known limitation, accepted with this choice:** if the effect is a
 threshold — nothing until the trailing gap exceeds some number of patches, then
-a jump — a linear slope could dilute it toward zero and read as equivalence.
-Making nonlinearity primary, or adding gap lengths, would address that at the
-cost of power and GPU time. **This is the single item in this document most
-worth overruling, and it is not decided.**
+a jump — a linear slope could dilute it toward zero. That is precisely why the
+slope is confined to the sub-question and cannot establish equivalence: only the
+four per-gap CIs can, and a threshold effect would surface there as a
+`MATERIAL_*` reading at the large gaps with `EQUIVALENT` or `UNRESOLVED` at the
+small ones, which §9 classifies as `INCONCLUSIVE`, never as equivalence.
 
 ---
 
@@ -276,28 +303,56 @@ families of 4, never one of 8, and never merged with any prior family.
 
 ## 9. Mechanism classification rule
 
-**DRAFT PROPOSAL — THRESHOLDS AWAIT SIGN-OFF. NOT AUTHORITATIVE.**
+**FROZEN. `rule_version: preregistered-v1`, `authoritative: True`.**
+
+`authoritative: True` means **the decision rule itself was preregistered** — its
+thresholds and precedence were fixed before any forecast, so the classification
+cannot have been tuned to the data. **It does NOT mean any resulting causal
+interpretation is authoritative.** No label isolates masking, normalization,
+positional handling, or any other internal component.
 
 Implemented as a deterministic function, `stats/mechanism_decision.py::classify`,
-unit-tested in the same style as `stats/decision.py`. Every decision it emits
-carries `authoritative: False` and a status string saying it awaits sign-off.
+unit-tested in the style of `stats/decision.py`.
 
-Precedence, fixed in advance:
+**Precedence, in order:**
 
-1. `R_g` readings **disagree in direction** across gaps → `INCONSISTENT_ACROSS_GAPS`.
-   A mechanism that reverses sign with gap length is not one mechanism, and this
-   deliberately **outranks** a majority reading (3 positive + 1 negative is not
-   a positive result).
-2. At least `min_consistent_gaps` (**proposed: 3 of 4**) agree on one reading →
-   `EFFECTIVE_HORIZON_ONLY`, `EXTRA_TRAILING_NAN_PENALTY`, or
-   `NAN_FRAMING_OUTPERFORMS`.
-3. Otherwise → `INCONCLUSIVE`.
+1. At least one `MATERIAL_POSITIVE` **and** at least one `MATERIAL_NEGATIVE`
+   → `DIRECTION_REVERSAL_ACROSS_GAPS`.
+2. All 4 gaps `EQUIVALENT` → `NO_MATERIAL_DIFFERENCE_VS_TRUNCATION`.
+3. ≥3 of 4 `MATERIAL_POSITIVE` and zero `MATERIAL_NEGATIVE`
+   → `CONSISTENT_EXTRA_TRAILING_GAP_PENALTY`.
+4. ≥3 of 4 `MATERIAL_NEGATIVE` and zero `MATERIAL_POSITIVE`
+   → `CONSISTENT_LOWER_ERROR_WITH_TRAILING_NAN`.
+5. Otherwise → `INCONCLUSIVE`, with exactly one machine-readable reason:
+   * `sparse_or_gap_dependent_directional_evidence` — ≥1 material directional
+     reading, fewer than three, and no opposite material direction;
+   * `mixed_equivalent_and_unresolved` — no material direction, but a mix of
+     equivalent and unresolved gaps;
+   * `insufficient_precision` — all four unresolved.
 
-`B_g` is recorded in the criteria but **never** determines the label.
+**Threshold scopes are distinct.** `min_consistent_gaps = 3` governs **only**
+rules 3–4. `equivalence_required_gaps = 4` governs **only** rule 2: family-wise
+equivalence is an **intersection** across all four gaps. A 3-of-4 equivalent
+subset is **not** family-wise equivalence without a separately adjusted
+procedure, and falls through to `INCONCLUSIVE`.
 
-**Open for sign-off:** the value of `min_consistent_gaps`; whether
-`INCONSISTENT_ACROSS_GAPS` should outrank a 3-of-4 majority (proposed: yes);
-and whether `INCONCLUSIVE` should be split by *why* it was inconclusive.
+Rule 1 deliberately **outranks** a 3-of-4 majority: 3 positive + 1 negative is a
+direction reversal, not a positive result.
+
+**Worked examples, each reproduced as a test:**
+
+| Readings | Label |
+|---|---|
+| 3 `EQUIVALENT` + 1 `MATERIAL_POSITIVE` (or `_NEGATIVE`) | `INCONCLUSIVE` (`sparse_or_gap_dependent_directional_evidence`) — **not** an equivalence result |
+| 2 `MATERIAL_POSITIVE` + 2 `EQUIVALENT` | `INCONCLUSIVE` (`sparse_or_gap_dependent_directional_evidence`) |
+| 3 `MATERIAL_POSITIVE` + 1 `MATERIAL_NEGATIVE` | `DIRECTION_REVERSAL_ACROSS_GAPS` — **not** a 3-of-4 majority |
+| 1 `UNRESOLVED` + 3 `EQUIVALENT` | `INCONCLUSIVE` (`mixed_equivalent_and_unresolved`) |
+| 4 `UNRESOLVED` | `INCONCLUSIVE` (`insufficient_precision`) |
+| 2 `MATERIAL_POSITIVE` + 2 `UNRESOLVED` | `INCONCLUSIVE` (`sparse_or_gap_dependent_directional_evidence`) |
+
+`B_g` and the dose-response slope are computed and reported alongside the
+classification but **never determine it**; tests prove that arbitrarily strong
+values of either cannot change the label.
 
 ---
 
@@ -311,12 +366,21 @@ and whether `INCONCLUSIVE` should be split by *why* it was inconclusive.
    `revision: 29ec3766d36d6f73f0696f85560a422f50e8498c`, `input_patch_size: 16`, `input_patch_stride: 16`,
    `output_patch_size: 16`, `max_output_patches: 64` → capacity 1,024. Any
    departure means §3.2 must be re-derived before the run, not during it.
-2. **Re-run `clean` and audit it against the original pilot.** Before any new
-   result is trusted, the clean condition must be re-run and its predictions
-   checksum/tolerance-audited against the original pilot's clean predictions, to
-   catch environment drift since the original run: model revision, dependency
-   versions, hardware. A `clean` that has moved invalidates cross-run
-   comparison, and the audit must run **before** any `R_g` or `B_g` is read.
+2. **Re-run `clean` and audit it against the original pilot — EXACT match, no
+   tolerance.** Before any new result is trusted, the clean condition must be
+   re-run and audited by `scripts/audit_clean_predictions.py`, which verifies
+   **identity before values**: matching `(origin_id, step_index)` key sets, a
+   row count of exactly 178 x 96, exact forecast timestamps, exact
+   `ground_truth`, per-origin `target_sha256` agreeing with `window_results.csv`
+   on both sides, matching dataset checksum and model revision, no duplicate or
+   missing cells — and only then the canonical origin/step-sorted float32
+   SHA256 of the predictions.
+
+   **A mismatch in any of those fields is a HARD STOP.** There is no tolerance
+   mechanism for any of them, and selecting one after seeing a discrepancy is
+   exactly what this audit exists to prevent. A `clean` that has moved
+   invalidates cross-run comparison, and the audit must run **before** any `R_g`
+   or `B_g` is read.
 3. **Confirm the origin set and target integrity** are byte-identical to the
    original run, via the existing `target_sha256` machinery.
 
@@ -364,7 +428,7 @@ All in `tests/test_trailing_gap.py`, all passing, all model-mocked:
 
 ---
 
-## 12. Summary of what is frozen vs. open
+## 12. Summary — every item is frozen
 
 | Item | Status |
 |---|---|
@@ -389,32 +453,52 @@ All in `tests/test_trailing_gap.py`, all passing, all model-mocked:
 
 ---
 
-## 13. Frozen for execution
+## 13. Amendment record
 
-The three items previously marked AWAITING SIGN-OFF are now **frozen**, per the
-Research Lead's conditional-GO corrections:
+| # | Date | Amendment |
+|---|---|---|
+| 1 | 2026-09-03 | `g=128` executability resolved: the pinned checkpoint's single-shot capacity is 1,024 steps against a 224-step maximum request. The hard stop and the cheap re-verification precondition were both retained. |
+| 2 | 2026-09-03 | §5.1 replaced by the four-way SESOI classification; §7 confined to the dose-response sub-question with `x = missing patches`; §9 replaced by the frozen precedence. Superseded text moved to Appendix A. |
+| 3 | 2026-09-03 | §10 audit tightened to identity-before-values with no tolerance mechanism, after review found the audit hashed prediction values only. |
 
-* **§5.1** — per-gap classification is **four-way** against `delta = 0.03 x
-  mean_clean_mae`: EQUIVALENT / MATERIAL_POSITIVE / MATERIAL_NEGATIVE /
-  UNRESOLVED. `ci_low_holm > 0` is **not** sufficient for MATERIAL_POSITIVE; the
-  bound must clear `+delta`. Interpretation text is fixed verbatim and travels
-  with every reading.
-* **§7** — the linear slope is the primary statistic for the **dose-response
-  sub-question only**, never primary evidence for the experiment; computed
-  against `x = g / patch_size` (missing patches). It never feeds the
-  classification. Curvature is descriptive only. A non-significant slope means
-  only "no detected linear trend".
-* **§9** — precedence fixed: direction reversal, then family-wise equivalence
-  (an **intersection** over all four gaps), then the two 3-of-4 directional
-  readings, then INCONCLUSIVE with exactly one machine-readable reason.
+No further amendment has been made. Any future change requires a numbered entry
+here.
 
-`rule_version: preregistered-v1`, `authoritative: True`.
+---
 
-**`authoritative: True` means the DECISION RULE was preregistered** — its
-thresholds and precedence were fixed before any forecast, so the classification
-cannot have been tuned to the data. **It does NOT mean any resulting causal
-interpretation is authoritative.** No label produced by this rule isolates
-masking, normalization, positional handling, or any other internal component.
+## 14. Appendix A — Superseded draft history
 
-Execution follows `docs/gpu_execution_runbook_trailing_gap.md`, whose steps 2
-and 4 are hard stops.
+> **NOT OPERATIVE. NOTHING IN THIS APPENDIX IS A RULE.**
+>
+> Retained only so the audit trail shows what changed and when. Every statement
+> here was replaced by the frozen text in the numbered sections above. Where
+> this appendix and the body disagree, **the body governs** — this appendix is
+> never the tiebreaker.
+
+**Superseded 2026-09-03 (amendment 2).** Before the Research Lead's
+conditional-GO corrections, this document carried three items marked as awaiting
+sign-off, and their earlier content is recorded here for provenance:
+
+* **§5.1** previously proposed a **three-way** reading — inside the equivalence
+  band, above it, below it — with `ci_low_holm > 0` sufficient for a positive
+  directional reading. **Replaced** by the four-way classification in which a
+  material reading requires the Holm bound to clear `±delta`, and everything
+  else is `UNRESOLVED`.
+* **§7** previously left the linear-versus-nonlinear choice open, and computed
+  the slope against raw `g`. **Replaced** by: linear primary for the
+  dose-response sub-question only, `x = g / patch_size`, never feeding the
+  classification, curvature descriptive only.
+* **§9** previously described a draft rule whose outputs carried
+  `authoritative: false`, keyed on a single `min_consistent_gaps` threshold.
+  **Replaced** by the frozen five-step precedence with distinct threshold
+  scopes, family-wise equivalence as an intersection, and three machine-readable
+  inconclusive reasons.
+
+**Superseded 2026-09-03 (amendment 3).** §10 previously described a
+"checksum/tolerance" audit of the clean re-run. **Replaced** by an exact audit
+verifying identity before values, with no tolerance mechanism for any field.
+
+The earlier sketch that preceded this document,
+`docs/next_round_trailing_gap_mechanism.md`, is separately marked superseded and
+carries its own description of the `truncated(g)` timestamp-misalignment bug
+that this preregistration's §3.1 corrects.

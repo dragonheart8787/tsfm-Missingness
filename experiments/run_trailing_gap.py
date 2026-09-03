@@ -40,18 +40,57 @@ from runner.run_pilot import RunPaths, assert_target_integrity, collect_environm
 from runner.windows import build_windows  # noqa: E402
 
 
-def completed_origins(paths: RunPaths) -> set[int]:
-    """Resume truth: the checkpoint INTERSECTED with what actually landed."""
-    if not paths.checkpoint.exists():
+def completed_cells(paths: RunPaths) -> set[tuple[int, str]]:
+    """Resume truth, at ORIGIN x CONDITION granularity.
+
+    The written result rows are the ONLY source of truth for what is done. A
+    per-origin "seen it" flag is not sufficient: a ``--only-conditions clean``
+    pass writes one row per origin, and an origin-level flag would then mark all
+    178 origins complete, so the following full-matrix run would skip every one
+    of them and silently never execute the other 2,136 forecasts. The count
+    assertion would catch that only afterwards, with the run already wasted.
+
+    The checkpoint is advisory metadata for humans; it never gates resumption.
+    """
+    if not paths.window_results.exists():
         return set()
-    state = json.loads(paths.checkpoint.read_text(encoding="utf-8"))
-    claimed = {int(o) for o in state.get("completed_origins", [])}
-    if not claimed or not paths.window_results.exists():
-        return set()
-    written = set(
-        pd.read_csv(paths.window_results, usecols=["origin_id"])["origin_id"].astype(int)
-    )
-    return claimed & written
+    frame = pd.read_csv(paths.window_results, usecols=["origin_id", "condition_id"])
+    return {
+        (int(origin), str(condition))
+        for origin, condition in zip(frame["origin_id"], frame["condition_id"])
+    }
+
+
+def completed_origins(paths: RunPaths, *, conditions_per_origin: int) -> set[int]:
+    """Origins with EVERY condition written. Derived from the cell truth above."""
+    counts: dict[int, int] = {}
+    for origin, _condition in completed_cells(paths):
+        counts[origin] = counts.get(origin, 0) + 1
+    return {origin for origin, n in counts.items() if n >= conditions_per_origin}
+
+
+def existing_clean_mae(paths: RunPaths) -> dict[int, float]:
+    """Clean MAE per origin from earlier passes, for pairing across a resume.
+
+    Without this, a full-matrix run resuming after a clean-only pass would find
+    no clean row to pair against in ITS pass and write NaN paired differences.
+    """
+    if not paths.window_results.exists():
+        return {}
+    frame = pd.read_csv(paths.window_results)
+    clean = frame[(frame["kind"] == "clean") & (frame["status"] == "ok")]
+    return {int(r.origin_id): float(r.mae) for r in clean.itertuples()}
+
+
+def existing_target_digests(paths: RunPaths) -> dict[int, set[str]]:
+    """Target digests already recorded per origin, so integrity spans resumes."""
+    if not paths.window_results.exists():
+        return {}
+    frame = pd.read_csv(paths.window_results, usecols=["origin_id", "target_sha256"])
+    out: dict[int, set[str]] = {}
+    for origin, digest in zip(frame["origin_id"], frame["target_sha256"]):
+        out.setdefault(int(origin), set()).add(str(digest))
+    return out
 
 
 def _append(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -59,11 +98,20 @@ def _append(path: Path, rows: list[dict[str, Any]]) -> None:
         pd.DataFrame(rows).to_csv(path, mode="a", header=not path.exists(), index=False)
 
 
-def _write_checkpoint(paths: RunPaths, *, run_id: str, done: set[int], ok: int, failed: int) -> None:
+def _write_checkpoint(
+    paths: RunPaths, *, run_id: str, cells: set[tuple[int, str]],
+    fully_done: set[int], ok: int, failed: int,
+) -> None:
+    """Advisory progress metadata. NEVER consulted when deciding what to run."""
     payload = {
         "run_id": run_id,
-        "completed_origins": sorted(done),
-        "n_completed": len(done),
+        "note": (
+            "Advisory only. Resumption is decided from window_results.csv at "
+            "origin x condition granularity; this file never gates it."
+        ),
+        "n_completed_cells": len(cells),
+        "completed_origins": sorted(fully_done),
+        "n_completed": len(fully_done),
         "forecasts_ok_this_process": ok,
         "forecasts_failed_this_process": failed,
         "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -89,9 +137,12 @@ def run_trailing_gap(
     values, timestamps, validation = load_series(config)
     windows = build_windows(values=values, timestamps=timestamps, config=config)
 
+    conditions_per_origin = int(gap_config["design"]["expected_conditions_per_origin"])
     paths = RunPaths(run_dir)
     paths.root.mkdir(parents=True, exist_ok=True)
-    done = completed_origins(paths)
+    done_cells = completed_cells(paths)
+    prior_clean_mae = existing_clean_mae(paths)
+    prior_digests = existing_target_digests(paths)
     run_id = run_id or (
         json.loads(paths.manifest.read_text(encoding="utf-8"))["run_id"]
         if paths.manifest.exists()
@@ -122,8 +173,6 @@ def run_trailing_gap(
     n_ok = n_failed = 0
 
     for window in selected:
-        if window.origin_id in done:
-            continue
         started = time.time()
         # Preflight runs inside build_conditions and hard-stops on a contract
         # violation, so an unrollable gap can never reach the model.
@@ -133,6 +182,14 @@ def run_trailing_gap(
         )
         if only_conditions:
             conditions = [c for c in conditions if c.kind in only_conditions]
+        # Skip only the CELLS already written, never the whole origin.
+        pending = [
+            c for c in conditions
+            if (window.origin_id, c.condition_id) not in done_cells
+        ]
+        if not pending:
+            continue
+        conditions = pending
 
         context_timestamps = timestamps[window.context_start : window.context_end_exclusive]
         result_rows: list[dict[str, Any]] = []
@@ -221,48 +278,83 @@ def run_trailing_gap(
                         }
                     )
 
+        # Integrity spans resumes: digests written in EARLIER passes for this
+        # origin must agree with the ones written now.
+        for earlier in prior_digests.get(window.origin_id, set()):
+            digests[f"__earlier_pass__{earlier[:8]}"] = earlier
         assert_target_integrity(window, digests)
+
+        # Pair against this pass's clean row, or an earlier pass's if the clean
+        # cell was written by a previous (e.g. clean-only) invocation.
+        clean_mae = (
+            clean_metrics.mae if clean_metrics
+            else prior_clean_mae.get(window.origin_id, float("nan"))
+        )
         for row in result_rows:
-            row["clean_mae"] = clean_metrics.mae if clean_metrics else float("nan")
+            row["clean_mae"] = clean_mae
             row["paired_diff_mae_from_clean"] = (
-                row["mae"] - row["clean_mae"]
-                if clean_metrics and np.isfinite(row["mae"]) else float("nan")
+                row["mae"] - clean_mae
+                if np.isfinite(clean_mae) and np.isfinite(row["mae"]) else float("nan")
             )
+        if clean_metrics is not None:
+            prior_clean_mae[window.origin_id] = clean_metrics.mae
 
         _append(paths.window_results, result_rows)
         _append(paths.predictions, prediction_rows)
-        done.add(window.origin_id)
-        _write_checkpoint(paths, run_id=run_id, done=done, ok=n_ok, failed=n_failed)
+        done_cells.update(
+            (window.origin_id, row["condition_id"]) for row in result_rows
+        )
+        prior_digests.setdefault(window.origin_id, set()).update(digests.values())
+        fully_done = completed_origins(paths, conditions_per_origin=conditions_per_origin)
+        _write_checkpoint(
+            paths, run_id=run_id, cells=done_cells, fully_done=fully_done,
+            ok=n_ok, failed=n_failed,
+        )
 
         message = (
-            f"origin {window.origin_id:4d} ({len(done)}/{len(selected)}) "
-            f"{time.time() - started:6.2f}s ok={n_ok} failed={n_failed}"
+            f"origin {window.origin_id:4d} (+{len(result_rows)} cells, "
+            f"{len(done_cells)} total) {time.time() - started:6.2f}s "
+            f"ok={n_ok} failed={n_failed}"
         )
         print(message, flush=True)
         with paths.log.open("a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}\n")
 
+    fully_done = completed_origins(paths, conditions_per_origin=conditions_per_origin)
     summary = {
         "run_id": run_id,
         "run_dir": str(paths.root),
-        "origins_completed": len(done),
+        "origins_fully_completed": len(fully_done),
+        "cells_completed": len(done_cells),
         "forecasts_ok_this_process": n_ok,
         "forecasts_failed_this_process": n_failed,
         "only_conditions": only_conditions,
         "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
-    if limit_origins is None and only_conditions is None and len(done) == int(
+    if limit_origins is None and only_conditions is None and len(fully_done) == int(
         design["expected_origins"]
     ):
         frame = pd.read_csv(paths.window_results)
-        expected = int(gap_config["design"]["expected_total_forecasts"])
+        expected_rows = int(gap_config["design"]["expected_total_forecasts"])
+        expected_cells = int(design["expected_origins"]) * conditions_per_origin
         summary["result_rows"] = len(frame)
-        summary["expected_result_rows"] = expected
-        if len(frame) != expected:
-            raise AssertionError(f"produced {len(frame)} rows, expected {expected}")
+        summary["expected_result_rows"] = expected_rows
+        summary["distinct_cells"] = int(
+            frame.drop_duplicates(subset=["origin_id", "condition_id"]).shape[0]
+        )
+        summary["expected_distinct_cells"] = expected_cells
+        if len(frame) != expected_rows:
+            raise AssertionError(f"produced {len(frame)} rows, expected {expected_rows}")
+        # Cell-level assertion at full scale: 178 x 13 = 2314 DISTINCT cells,
+        # not merely 2314 rows, so a duplicated cell cannot mask a missing one.
+        if summary["distinct_cells"] != expected_cells:
+            raise AssertionError(
+                f"produced {summary['distinct_cells']} distinct origin x condition "
+                f"cells, expected {expected_cells}"
+            )
         per_origin = frame.groupby("origin_id").size().unique().tolist()
-        if per_origin != [int(gap_config["design"]["expected_conditions_per_origin"])]:
+        if per_origin != [conditions_per_origin]:
             raise AssertionError(f"conditions per origin: {per_origin}")
         if frame.duplicated(subset=["origin_id", "condition_id"]).any():
             raise AssertionError("duplicate origin x condition cells")

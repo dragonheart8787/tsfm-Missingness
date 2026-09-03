@@ -12,7 +12,11 @@ import pandas as pd
 import pytest
 import yaml
 
-from experiments.run_trailing_gap import completed_origins, run_trailing_gap
+from experiments.run_trailing_gap import (
+    completed_cells,
+    completed_origins,
+    run_trailing_gap,
+)
 from model.chronos2_runner import MockForecaster
 from runner.run_pilot import RunPaths
 
@@ -88,14 +92,15 @@ def test_target_digest_is_identical_across_all_conditions(local_config, gap_conf
 def test_resume_does_not_duplicate_or_overwrite(local_config, gap_config, tmp_path):
     run_dir = tmp_path / "resume"
     first = _run(local_config, gap_config, run_dir, 3)
-    assert first["origins_completed"] == 3
+    assert first["origins_fully_completed"] == 3
     before = pd.read_csv(run_dir / "window_results.csv")
     assert len(before) == 3 * 13
-    assert completed_origins(RunPaths(run_dir)) == {0, 1, 2}
+    assert completed_origins(RunPaths(run_dir), conditions_per_origin=13) == {0, 1, 2}
+    assert len(completed_cells(RunPaths(run_dir))) == 3 * 13
 
     second = _run(local_config, gap_config, run_dir, 6)
     after = pd.read_csv(run_dir / "window_results.csv")
-    assert second["origins_completed"] == 6
+    assert second["origins_fully_completed"] == 6
     assert len(after) == 6 * 13
     assert not after.duplicated(subset=["origin_id", "condition_id"]).any()
     pd.testing.assert_frame_equal(
@@ -107,14 +112,24 @@ def test_resume_does_not_duplicate_or_overwrite(local_config, gap_config, tmp_pa
     assert third["forecasts_ok_this_process"] == 0
 
 
-def test_a_torn_checkpoint_does_not_strand_an_origin(local_config, gap_config, tmp_path):
+def test_a_lying_checkpoint_cannot_cause_a_skip(local_config, gap_config, tmp_path):
+    """The checkpoint is advisory; the result rows are the only resume truth."""
     run_dir = tmp_path / "torn"
     _run(local_config, gap_config, run_dir, 3)
     paths = RunPaths(run_dir)
     state = json.loads(paths.checkpoint.read_text(encoding="utf-8"))
-    state["completed_origins"] = [0, 1, 2, 3, 4]  # claims two never written
+    state["completed_origins"] = [0, 1, 2, 3, 4]   # claims two never written
+    state["n_completed_cells"] = 9999
     paths.checkpoint.write_text(json.dumps(state), encoding="utf-8")
-    assert completed_origins(paths) == {0, 1, 2}
+
+    assert completed_origins(paths, conditions_per_origin=13) == {0, 1, 2}
+    assert len(completed_cells(paths)) == 3 * 13
+
+    # A resume must still execute origins 3 and 4 in full.
+    _run(local_config, gap_config, run_dir, 5)
+    frame = pd.read_csv(run_dir / "window_results.csv")
+    assert len(frame) == 5 * 13
+    assert not frame.duplicated(subset=["origin_id", "condition_id"]).any()
 
 
 def test_failures_are_recorded_not_swallowed(local_config, gap_config, tmp_path):
@@ -272,3 +287,116 @@ def test_clean_audit_offers_no_tolerance_flag():
     assert "--tolerance" not in source
     assert "atol" not in source and "rtol" not in source
     assert "np.isclose" not in source and "allclose" not in source
+
+
+# --------------------------------------------------------------------------- #
+# BLOCKER 1 — clean-only -> full-matrix resume at cell granularity
+# --------------------------------------------------------------------------- #
+
+def test_clean_only_then_full_matrix_resume_executes_the_remaining_cells(
+    local_config, gap_config, tmp_path
+):
+    """The exact scenario from the blocker report, at 5 origins.
+
+    Before the fix: the clean-only pass marked all 5 origins complete, the full
+    run skipped every one, and only 5 of the 65 cells ever existed.
+    """
+    run_dir = tmp_path / "b1"
+
+    # 1. clean-only -> 5 rows, one per origin.
+    first = run_trailing_gap(
+        config=local_config, gap_config=gap_config, forecaster=MockForecaster(),
+        run_dir=run_dir, limit_origins=5, only_conditions=["clean"],
+    )
+    after_clean = pd.read_csv(run_dir / "window_results.csv")
+    assert len(after_clean) == 5
+    assert after_clean["kind"].unique().tolist() == ["clean"]
+    assert first["forecasts_ok_this_process"] == 5
+
+    # 2. full matrix -> skips exactly the 5 clean cells, runs the other 60.
+    full_forecaster = MockForecaster()
+    second = run_trailing_gap(
+        config=local_config, gap_config=gap_config, forecaster=full_forecaster,
+        run_dir=run_dir, limit_origins=5,
+    )
+    assert second["forecasts_ok_this_process"] == 60, "must run 12 conditions x 5 origins"
+    assert len(full_forecaster.calls) == 60, "exactly 60 model calls, no re-runs"
+
+    # 3. 65 rows total, and the original clean rows byte-unchanged.
+    after_full = pd.read_csv(run_dir / "window_results.csv")
+    assert len(after_full) == 65
+    preserved = after_full[after_full["kind"] == "clean"].reset_index(drop=True)
+    pd.testing.assert_frame_equal(
+        after_clean.reset_index(drop=True), preserved[after_clean.columns],
+        check_exact=True,
+    )
+
+    # 4. a third full invocation -> zero model calls, zero duplicates.
+    third_forecaster = MockForecaster()
+    third = run_trailing_gap(
+        config=local_config, gap_config=gap_config, forecaster=third_forecaster,
+        run_dir=run_dir, limit_origins=5,
+    )
+    assert len(third_forecaster.calls) == 0, "a completed matrix must issue no calls"
+    assert third["forecasts_ok_this_process"] == 0
+    final = pd.read_csv(run_dir / "window_results.csv")
+    assert len(final) == 65
+    assert not final.duplicated(subset=["origin_id", "condition_id"]).any()
+    assert len(completed_cells(RunPaths(run_dir))) == 65
+
+
+def test_resume_after_clean_only_pairs_against_the_earlier_clean_row(
+    local_config, gap_config, tmp_path
+):
+    """The clean row from an earlier pass must still supply clean_mae.
+
+    Otherwise every paired difference written by the resuming pass is NaN.
+    """
+    run_dir = tmp_path / "b1pair"
+    run_trailing_gap(
+        config=local_config, gap_config=gap_config, forecaster=MockForecaster(),
+        run_dir=run_dir, limit_origins=5, only_conditions=["clean"],
+    )
+    run_trailing_gap(
+        config=local_config, gap_config=gap_config, forecaster=MockForecaster(),
+        run_dir=run_dir, limit_origins=5,
+    )
+    frame = pd.read_csv(run_dir / "window_results.csv")
+    assert frame["clean_mae"].notna().all(), "clean pairing lost across the resume"
+    assert frame["paired_diff_mae_from_clean"].notna().all()
+    # Every row of an origin pairs against that origin's single clean MAE.
+    assert frame.groupby("origin_id")["clean_mae"].nunique().max() == 1
+
+
+def test_partial_condition_subsets_resume_correctly(local_config, gap_config, tmp_path):
+    """Generalisation: any subset, in any order, converges on the full matrix."""
+    run_dir = tmp_path / "b1subset"
+    for subset in (["clean"], ["internal_block"], ["trailing_nan"], None):
+        run_trailing_gap(
+            config=local_config, gap_config=gap_config, forecaster=MockForecaster(),
+            run_dir=run_dir, limit_origins=3,
+            only_conditions=subset,
+        )
+    frame = pd.read_csv(run_dir / "window_results.csv")
+    assert len(frame) == 3 * 13
+    assert not frame.duplicated(subset=["origin_id", "condition_id"]).any()
+    assert sorted(frame["kind"].unique()) == [
+        "clean", "internal_block", "trailing_nan", "truncated_long"
+    ]
+
+
+def test_full_scale_cell_expectations_are_declared(config, gap_config):
+    """The 5-origin test is for iteration speed; full scale is asserted too."""
+    origins = int(config["design"]["expected_origins"])
+    per_origin = int(gap_config["design"]["expected_conditions_per_origin"])
+    assert origins == 178 and per_origin == 13
+    assert origins * per_origin == 2314 == int(
+        gap_config["design"]["expected_total_forecasts"]
+    )
+    # The runner asserts DISTINCT cells at full scale, so a duplicated cell
+    # cannot mask a missing one.
+    source = (REPO_ROOT / "experiments" / "run_trailing_gap.py").read_text(
+        encoding="utf-8"
+    )
+    assert "expected_distinct_cells" in source
+    assert 'drop_duplicates(subset=["origin_id", "condition_id"])' in source

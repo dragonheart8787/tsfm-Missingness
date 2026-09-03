@@ -603,7 +603,7 @@ adjustment — every d value would need recomputing on a different grid.
 | Resume never duplicates or overwrites | Atomic checkpoint written **after** rows land on disk; resume intersects the checkpoint with what the results file actually contains |
 | Failures are recorded, not swallowed | Every failure produces its result row with `status="failed"` and the exception message |
 
-**Test suite size.** 261 non-model tests + 3 real-model tests (require GPU/model access) = 264 total. Stated this way rather than as a single number,
+**Test suite size.** 296 non-model tests + 3 real-model tests (require GPU/model access) = 299 total. Stated this way rather than as a single number,
 because a bare count reads differently depending on whether the environment can
 load the model: on a CPU-only host 3 tests are deselected, so "175 tests" and
 "172 passed" are both true and neither is the whole picture.

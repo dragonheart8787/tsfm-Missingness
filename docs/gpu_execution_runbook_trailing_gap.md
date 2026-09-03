@@ -6,7 +6,13 @@ Steps 2 and 4 are **hard stops**: if either fails, stop and report. Do not
 select a tolerance after seeing a discrepancy — a mismatch is a stop, not a
 tuning problem.
 
-Frozen commit: **`e4184cb`** (see Section 7 of the completion report).
+**Execution commit (F): `<FROZEN_COMMIT_F>`** — the implementation freeze. This
+is what step 1 checks out and what the run manifest must record as executed.
+
+This runbook ships in a later documentation commit (D), which names F above.
+**D is never the executed commit.** If `git rev-parse HEAD` during the run does
+not equal F, stop: the manifest would otherwise attribute results to the wrong
+tree.
 
 ---
 
@@ -16,8 +22,9 @@ Frozen commit: **`e4184cb`** (see Section 7 of the completion report).
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/chronos2-missingness-pilot-xwx5y7
-git checkout e4184cb
-git status --porcelain          # must print nothing
+git checkout <FROZEN_COMMIT_F>    # F, the implementation-freeze commit
+git status --porcelain            # must print nothing
+git rev-parse HEAD                # must equal F; record it in the run manifest
 
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python torch --torch-backend cu124
@@ -83,13 +90,22 @@ Expect 178 rows, `kind == clean`, zero failures. Nothing else runs yet.
   --reference-run-dir results/pilot_v1 2>&1 | tee handoff/05_clean_audit.txt
 ```
 
-Canonical origin/step-sorted float32 SHA256 of the clean predictions, compared
-against the original pilot's.
+Verifies **identity before values**, each check a hard stop:
 
-> **HARD STOP.** The hashes must match **exactly**. If they differ, the script
-> exits non-zero and prints full diagnostics (first differing origin/step, max
-> absolute deviation, per-origin mismatch counts). Stop and report them.
-> **Do not select a tolerance after seeing the discrepancy.**
+1. no duplicate or missing cells; row count exactly 178 x 96 = 17,088
+2. identical `(origin_id, step_index)` key sets
+3. exact forecast timestamps
+4. exact `ground_truth`
+5. per-origin `target_sha256` agreeing with `window_results.csv` on both sides
+6. matching dataset checksum and model revision
+7. canonical origin/step-sorted float32 SHA256 of the predictions
+
+> **HARD STOP.** Every check must pass. Identical prediction numbers are not
+> sufficient: they would pass even with origin keys, timestamps, ground truth or
+> target digests wrong underneath them, which is exactly why identity is checked
+> first. The script exits non-zero and prints every failure with diagnostics.
+> **There is no tolerance mechanism for any field, and none may be added after
+> seeing a discrepancy.**
 
 ---
 
@@ -100,8 +116,10 @@ tmux new -d -s tgap '.venv/bin/python experiments/run_trailing_gap.py \
   --run-dir results/trailing_gap_v1 >> results/trailing_gap_v1.stdout.log 2>&1'
 ```
 
-The runner resumes: the 178 clean cells are already checkpointed, so this adds
-the remaining **2,136** (12 conditions × 178 origins) for **2,314** total.
+The runner resumes at **origin x condition** granularity: the 178 clean cells
+already written are skipped individually, and this adds the remaining **2,136**
+(12 conditions × 178 origins) for **2,314** total. Resumption is decided from
+`window_results.csv`; the checkpoint file is advisory and never gates it.
 
 Progress from a fresh login:
 
