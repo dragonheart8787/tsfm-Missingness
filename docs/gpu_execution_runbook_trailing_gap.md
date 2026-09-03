@@ -6,7 +6,7 @@ Steps 2 and 4 are **hard stops**: if either fails, stop and report. Do not
 select a tolerance after seeing a discrepancy — a mismatch is a stop, not a
 tuning problem.
 
-**Execution commit (F): `e49c5402ff6037c52469c1d848460fb08ad9c6de`** — the implementation freeze. This
+**Execution commit (F): `<FROZEN_COMMIT_F2>`** — the implementation freeze. This
 is what step 1 checks out and what the run manifest must record as executed.
 
 This runbook ships in a later documentation commit (D), which names F above.
@@ -22,7 +22,7 @@ tree.
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/chronos2-missingness-pilot-xwx5y7
-git checkout e49c5402ff6037c52469c1d848460fb08ad9c6de    # F, the implementation-freeze commit
+git checkout <FROZEN_COMMIT_F2>    # F, the implementation-freeze commit
 git status --porcelain            # must print nothing
 git rev-parse HEAD                # must equal F; record it in the run manifest
 
@@ -71,6 +71,38 @@ this project's history** — `BJ1_20`, `BJ2_40`, `IC1_20`, `IC2_40`.
 ---
 
 ## 3. Run ONLY the 178 clean forecasts
+
+### 3.0 Initialization guard — HARD STOP
+
+**Run this once, before the first execution below.** The run directory must not
+already exist: a leftover directory from an abandoned attempt would be resumed
+into, silently mixing cells from two different runs.
+
+```bash
+# Wrapped in a subshell so the `exit` cannot close your login shell when pasted.
+( test -e results/trailing_gap_v1 && {
+    echo "HARD STOP: results/trailing_gap_v1 already exists."
+    echo "Do not delete, overwrite, or reuse it. Report it and await instruction."
+    ls -la results/trailing_gap_v1
+    exit 1
+  }
+  echo "OK: no existing run directory; safe to initialize." )
+echo "guard exit status: $?    # 0 = safe to proceed, 1 = HARD STOP"
+```
+
+> **HARD STOP.** If the directory exists, stop and report. **Do not delete it,
+> do not overwrite it, and do not silently reuse it** — it may hold results
+> produced under a different commit or a partially completed attempt, and only
+> the Research Lead can decide what it is.
+
+**This guard applies at INITIALIZATION ONLY.** Once step 3 has created the
+directory, it is the correct one: step 5's full-matrix pass and every
+interruption-recovery resume must continue using **that same directory** and the
+**same execution commit F**. Do not re-run this guard before step 5 or before a
+resume — resumption at origin × condition granularity is the intended behavior
+there, and re-running the guard would wrongly block it.
+
+### 3.1 Execute
 
 ```bash
 .venv/bin/python experiments/run_trailing_gap.py \
@@ -175,4 +207,5 @@ classification.
 | Step | Condition | Action on failure |
 |---|---|---|
 | 2 | Reproduced summaries disagree with reported history | Stop. Report. Do not run step 3. |
+| 3.0 | `results/trailing_gap_v1` already exists at initialization | Stop. Report. Do not delete, overwrite or reuse it. (Initialization only — never re-run before step 5 or a resume.) |
 | 4 | Clean-prediction hash differs from the original pilot | Stop. Report full diagnostics. Do not tune a tolerance. Do not run step 5. |

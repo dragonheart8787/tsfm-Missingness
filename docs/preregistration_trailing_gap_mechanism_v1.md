@@ -273,7 +273,7 @@ confidence: a quadratic on four points has 1 residual degree of freedom, so a
 nonlinearity test here would be badly underpowered and prone to
 over-interpretation. The per-gap readings in §5.1 already surface a non-monotone
 pattern qualitatively — and the classification rule treats direction
-disagreement across gaps as `INCONSISTENT_ACROSS_GAPS` rather than averaging it
+disagreement across gaps as `DIRECTION_REVERSAL_ACROSS_GAPS` rather than averaging it
 away.
 
 **The known limitation, accepted with this choice:** if the effect is a

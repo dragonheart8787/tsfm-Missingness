@@ -66,11 +66,16 @@ preconditions_for_execution:
   # Documented preconditions. NOT run today.
   reverify_model_contract: true
   reverify_clean_against_original_run: true
-  clean_audit_tolerance_note: >-
+  clean_audit_exact_match_note: >-
     Before any new result is trusted, the clean condition must be re-run and
-    its predictions checksum/tolerance-audited against the original pilot's
-    clean predictions, to catch environment drift (model revision, dependency
-    versions, hardware) since the original run.
+    audited against the original pilot's clean predictions, to catch
+    environment drift (model revision, dependency versions, hardware) since
+    the original run. The audit is EXACT: every identity field
+    ((origin_id, step_index) key sets, forecast timestamps, ground_truth,
+    per-origin target_sha256, dataset checksum, model revision, row
+    cardinality) and the canonical float32 prediction SHA256 must match
+    exactly. There is no numerical tolerance of any kind for any field, and
+    none may be introduced after a discrepancy is observed.
   submit_for_independent_review:
     - "executed config"
     - "run manifest"

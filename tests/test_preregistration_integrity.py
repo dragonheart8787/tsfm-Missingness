@@ -135,3 +135,165 @@ def test_section_10_describes_an_exact_audit_with_no_tolerance():
     assert "identity before values" in section.lower()
     assert "no tolerance mechanism" in section
     assert "checksum/tolerance-audited" not in section
+
+
+# =========================================================================== #
+# Final release-gate static regressions
+#
+# Each scan is paired with a proof that it would actually catch a
+# reintroduction, so none of them can pass vacuously.
+# =========================================================================== #
+
+STALE_CONFIG_KEY = "clean_audit_tolerance_note"
+STALE_AUDIT_PHRASE = "checksum/tolerance-audited"
+# Assembled at runtime so this file does not itself contain the literal and
+# trip its own repo-wide scan below.
+STALE_LABEL = "INCONSISTENT" + "_ACROSS_GAPS"
+
+
+# --- 1. the renamed config key must not come back ------------------------- #
+
+def test_stale_clean_audit_tolerance_key_is_absent_from_the_config():
+    """The key was renamed to clean_audit_exact_match_note.
+
+    The old name implies a tolerance the audit does not have and never had.
+    """
+    text = GAP_CONFIG.read_text(encoding="utf-8")
+    offenders = [
+        f"{GAP_CONFIG.name}:{n}: {line.strip()}"
+        for n, line in enumerate(text.splitlines(), start=1)
+        if STALE_CONFIG_KEY in line
+    ]
+    assert not offenders, "the stale tolerance key reappeared:\n  " + "\n  ".join(offenders)
+
+
+def test_the_renamed_key_is_present_and_states_exact_matching():
+    config = yaml.safe_load(GAP_CONFIG.read_text(encoding="utf-8"))
+    note = config["preconditions_for_execution"]["clean_audit_exact_match_note"]
+    assert "EXACT" in note
+    assert "no numerical tolerance" in note.lower()
+    assert STALE_CONFIG_KEY not in config["preconditions_for_execution"]
+
+
+def test_the_stale_key_scan_would_catch_a_reintroduction(tmp_path):
+    """Non-vacuity: the scan's own predicate fires on a planted violation."""
+    planted = tmp_path / "cfg.yaml"
+    planted.write_text(
+        f"preconditions_for_execution:\n  {STALE_CONFIG_KEY}: >-\n    something\n",
+        encoding="utf-8",
+    )
+    offenders = [
+        line for line in planted.read_text(encoding="utf-8").splitlines()
+        if STALE_CONFIG_KEY in line
+    ]
+    assert offenders, "the scan predicate failed to detect a planted stale key"
+
+
+# --- 2. the tolerance-audit phrase must not appear in operative text ------- #
+
+def _operative_files_for_audit_phrase() -> list[tuple[str, str]]:
+    """(label, operative text) for every file the phrase must stay out of.
+
+    The preregistration contributes only its operative body: Appendix A
+    legitimately records that the phrase WAS used and was replaced, and that
+    historical note must survive.
+    """
+    return [
+        (GAP_CONFIG.name, GAP_CONFIG.read_text(encoding="utf-8")),
+        (PREREG.name, _operative_text(PREREG)),
+        (
+            "gpu_execution_runbook_trailing_gap.md",
+            (REPO_ROOT / "docs" / "gpu_execution_runbook_trailing_gap.md").read_text(
+                encoding="utf-8"
+            ),
+        ),
+    ]
+
+
+def test_checksum_tolerance_phrase_is_absent_from_operative_config_and_docs():
+    offenders = [
+        f"{label}: {line.strip()}"
+        for label, text in _operative_files_for_audit_phrase()
+        for line in text.splitlines()
+        if STALE_AUDIT_PHRASE in line
+    ]
+    assert not offenders, (
+        "the tolerance-audit phrasing reappeared in operative text:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_historical_mention_survives_in_the_appendix():
+    """The scan must not be satisfied by deleting the audit trail."""
+    text = PREREG.read_text(encoding="utf-8")
+    appendix = text[text.index(APPENDIX_HEADING):]
+    assert "checksum/tolerance" in appendix, (
+        "Appendix A must keep the record of what amendment 3 replaced"
+    )
+
+
+def test_the_audit_phrase_scan_would_catch_a_reintroduction(tmp_path):
+    """Non-vacuity, including that the appendix exemption is not a blanket one."""
+    planted = tmp_path / "doc.md"
+    planted.write_text(
+        f"## 10. Preconditions\n\nPredictions are {STALE_AUDIT_PHRASE} against the "
+        f"original run.\n\n{APPENDIX_HEADING}\n\nhistorical {STALE_AUDIT_PHRASE} note\n",
+        encoding="utf-8",
+    )
+    operative = _operative_text(planted)
+    assert STALE_AUDIT_PHRASE in operative, "a violation in the body must be visible"
+    appendix_only = planted.read_text(encoding="utf-8")[
+        planted.read_text(encoding="utf-8").index(APPENDIX_HEADING):
+    ]
+    assert STALE_AUDIT_PHRASE in appendix_only, "the appendix copy is correctly exempt"
+
+
+# --- 3. the superseded classification label ------------------------------- #
+
+def test_stale_classification_label_is_absent_from_the_operative_body():
+    """The frozen label is DIRECTION_REVERSAL_ACROSS_GAPS."""
+    text = _operative_text(PREREG)
+    offenders = [
+        f"{PREREG.name}:{n}: {line.strip()}"
+        for n, line in enumerate(text.splitlines(), start=1)
+        if STALE_LABEL in line
+    ]
+    assert not offenders, (
+        "the superseded label reappeared in the operative body:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_frozen_label_is_the_one_the_document_uses():
+    text = _operative_text(PREREG)
+    assert "DIRECTION_REVERSAL_ACROSS_GAPS" in text
+    # ...and it is the label the implementation actually emits.
+    from stats.mechanism_decision import DIRECTION_REVERSAL
+
+    assert DIRECTION_REVERSAL == "DIRECTION_REVERSAL_ACROSS_GAPS"
+    assert DIRECTION_REVERSAL in text
+
+
+def test_the_stale_label_scan_would_catch_a_reintroduction(tmp_path):
+    """Non-vacuity: a body occurrence is caught, an appendix one is exempt."""
+    planted = tmp_path / "doc.md"
+    planted.write_text(
+        f"## 9. Rule\n\nreadings disagree -> `{STALE_LABEL}`\n\n"
+        f"{APPENDIX_HEADING}\n\nformerly `{STALE_LABEL}`\n",
+        encoding="utf-8",
+    )
+    operative = _operative_text(planted)
+    assert STALE_LABEL in operative, "a violation in the body must be visible"
+    assert operative.count(STALE_LABEL) == 1, "only the body occurrence is in scope"
+
+
+def test_no_stale_label_anywhere_in_the_implementation():
+    """The code must not carry the interim name either."""
+    offenders = []
+    for pattern in ("*.py", "*.yaml"):
+        for path in REPO_ROOT.rglob(pattern):
+            if {".venv", ".git"} & set(path.relative_to(REPO_ROOT).parts):
+                continue
+            if STALE_LABEL in path.read_text(encoding="utf-8"):
+                offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert not offenders, f"the superseded label persists in: {offenders}"
