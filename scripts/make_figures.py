@@ -184,7 +184,7 @@ def main() -> int:
     parser.add_argument("--out-dir", default="report/figures")
     args = parser.parse_args()
 
-    config = yaml.safe_load((REPO_ROOT / args.config).read_text())
+    config = yaml.safe_load((REPO_ROOT / args.config).read_text(encoding="utf-8"))
     run_dir = REPO_ROOT / args.run_dir
     out_dir = REPO_ROOT / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -193,7 +193,7 @@ def main() -> int:
     paired = pd.read_csv(run_dir / "paired_differences.csv", index_col=0)
     bootstrap = pd.read_csv(run_dir / "bootstrap_results.csv")
     diagnostics = pd.read_csv(run_dir / "mask_diagnostics.csv")
-    contrasts = json.loads((run_dir / "analysis.json").read_text())["contrasts"]
+    contrasts = json.loads((run_dir / "analysis.json").read_text(encoding="utf-8"))["contrasts"]
 
     fig_mae_by_block_distance(matrix, config, out_dir / "fig1_mae_by_block_distance.png")
     fig_paired_difference_distributions(paired, contrasts, out_dir / "fig2_paired_differences.png")

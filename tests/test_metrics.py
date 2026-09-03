@@ -103,7 +103,7 @@ def test_12i_mase_is_excluded_from_the_decision_rule(config):
     """The decision function must not consume MASE anywhere."""
     from pathlib import Path
 
-    source = Path("stats/decision.py").read_text().lower()
+    source = Path("stats/decision.py").read_text(encoding="utf-8").lower()
     assert "mase" not in source
     fields = set(__import__("stats.decision", fromlist=["ContrastStat"]).ContrastStat.__dataclass_fields__)
     assert not any("mase" in f for f in fields)

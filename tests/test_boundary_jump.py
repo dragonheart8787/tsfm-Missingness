@@ -133,7 +133,7 @@ def test_top_origin_share_is_the_shared_implementation():
     import stats.internal_only as module
 
     assert module.top_origin_share is top_origin_share
-    source = Path("stats/internal_only.py").read_text()
+    source = Path("stats/internal_only.py").read_text(encoding="utf-8")
     assert "def top_origin_share" not in source, "a second copy was defined"
 
 
@@ -172,7 +172,7 @@ def test_equivalence_band_is_not_hardcoded_anywhere(config):
 
     from pathlib import Path
 
-    source = Path("stats/internal_only.py").read_text()
+    source = Path("stats/internal_only.py").read_text(encoding="utf-8")
     assert "0.03" not in source, "the +/-3% literal was copied instead of imported"
 
 

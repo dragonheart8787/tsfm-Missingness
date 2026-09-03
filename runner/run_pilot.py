@@ -134,7 +134,7 @@ def completed_origins(paths: RunPaths) -> set[int]:
     """
     if not paths.checkpoint.exists():
         return set()
-    state = json.loads(paths.checkpoint.read_text())
+    state = json.loads(paths.checkpoint.read_text(encoding="utf-8"))
     claimed = {int(o) for o in state.get("completed_origins", [])}
     if not claimed or not paths.window_results.exists():
         return set()
@@ -220,7 +220,7 @@ def run_pilot(
     done = completed_origins(paths)
 
     run_id = run_id or (
-        json.loads(paths.manifest.read_text())["run_id"]
+        json.loads(paths.manifest.read_text(encoding="utf-8"))["run_id"]
         if paths.manifest.exists()
         else f"{config['run']['name']}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
     )
@@ -237,7 +237,7 @@ def run_pilot(
         "expected_total_forecasts": int(design["expected_total_forecasts"]),
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    paths.manifest.write_text(json.dumps(manifest, indent=2, default=str))
+    paths.manifest.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
 
     selected = windows if limit_origins is None else windows[:limit_origins]
     n_ok = 0
@@ -407,7 +407,7 @@ def run_pilot(
             f"({len(done)} complete) {elapsed:6.2f}s ok={n_ok} failed={n_failed}"
         )
         print(message, flush=True)
-        with paths.log.open("a") as fh:
+        with paths.log.open("a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}\n")
 
     summary = {
@@ -438,7 +438,7 @@ def run_pilot(
             frame.groupby("origin_id")["target_sha256"].nunique().max()
         )
 
-    (paths.root / "run_summary.json").write_text(json.dumps(summary, indent=2, default=str))
+    (paths.root / "run_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return summary
 
 
@@ -460,7 +460,7 @@ def _write_checkpoint(paths: RunPaths, *, run_id: str, done: set[int], n_ok: int
         "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     tmp = paths.checkpoint.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     os.replace(tmp, paths.checkpoint)  # atomic: a crash never leaves a torn checkpoint
 
 
@@ -476,7 +476,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    config = yaml.safe_load((REPO_ROOT / args.config).read_text())
+    config = yaml.safe_load((REPO_ROOT / args.config).read_text(encoding="utf-8"))
     run_dir = REPO_ROOT / args.run_dir
 
     if args.mock_model:

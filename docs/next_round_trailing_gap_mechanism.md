@@ -1,5 +1,14 @@
 # DRAFT next-round preregistration: trailing-gap mechanism experiment
 
+> **SUPERSEDED by `docs/preregistration_trailing_gap_mechanism_v1.md`.**
+>
+> Kept for the record only. Its `truncated(g)` arm contained a fatal bug: it
+> supplied a context of `L-g` and asked for `H` steps, so the model would
+> forecast `[L-g, L-g+H)` while the pilot scored `[L, L+H)` — a `g`-step
+> timestamp misalignment. The corrected `truncated_long(g)` in the
+> preregistration requests `H+g` steps and drops the first `g`. **Do not build
+> from this file.**
+>
 > **STATUS: DRAFT DESIGN ONLY. NOT IMPLEMENTED, NOT RUN.**
 >
 > No inference code, runner change, mask generator, or config entry exists for

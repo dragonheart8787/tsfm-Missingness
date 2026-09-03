@@ -183,7 +183,7 @@ def main() -> int:
     args = parser.parse_args()
 
     config_path = REPO_ROOT / args.config
-    config = yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     ds = config["dataset"]
 
     csv_path = REPO_ROOT / ds["local_path"]
@@ -197,15 +197,15 @@ def main() -> int:
 
     metadata_path = REPO_ROOT / ds["metadata_path"]
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_path.write_text(validation.to_json())
+    metadata_path.write_text(validation.to_json(), encoding="utf-8")
 
     print(validation.to_json())
 
     if args.write_checksum:
-        text = config_path.read_text()
+        text = config_path.read_text(encoding="utf-8")
         old = ds.get("expected_sha256") or "null"
         text = text.replace(f'expected_sha256: "{old}"', f'expected_sha256: "{validation.sha256}"')
-        config_path.write_text(text)
+        config_path.write_text(text, encoding="utf-8")
         print(f"\nWrote expected_sha256={validation.sha256} into {args.config}")
 
     problems: list[str] = []

@@ -53,7 +53,7 @@ def test_13_resume_does_not_duplicate_or_overwrite(small_config, tmp_path, monke
     frame_after_first = pd.read_csv(paths.window_results)
     assert len(frame_after_first) == 4 * 17
     assert completed_origins(paths) == {0, 1, 2, 3}
-    checkpoint = json.loads(paths.checkpoint.read_text())
+    checkpoint = json.loads(paths.checkpoint.read_text(encoding="utf-8"))
     assert checkpoint["completed_origins"] == [0, 1, 2, 3]
 
     # Interrupt and resume: extend to 7 origins with a FRESH forecaster.
@@ -107,9 +107,9 @@ def test_13c_a_torn_checkpoint_does_not_strand_an_origin(small_config, tmp_path,
     _run(small_config, run_dir, 3)
 
     paths = RunPaths(run_dir)
-    state = json.loads(paths.checkpoint.read_text())
+    state = json.loads(paths.checkpoint.read_text(encoding="utf-8"))
     state["completed_origins"] = [0, 1, 2, 3, 4]   # claims two origins never written
-    paths.checkpoint.write_text(json.dumps(state))
+    paths.checkpoint.write_text(json.dumps(state), encoding="utf-8")
 
     assert completed_origins(paths) == {0, 1, 2}, (
         "resume trusted the checkpoint over the results file and would have skipped "

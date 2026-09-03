@@ -90,7 +90,7 @@ def analyse(
 
     existing = out_dir / "decision.json"
     if existing.exists() and not allow_overwrite:
-        previous = json.loads(existing.read_text()).get("decision_rule_version", "v1")
+        previous = json.loads(existing.read_text(encoding="utf-8")).get("decision_rule_version", "v1")
         if previous != DECISION_RULE_VERSION:
             raise FileExistsError(
                 f"{existing} was produced by decision rule {previous}, but this run uses "
@@ -370,6 +370,6 @@ def analyse(
     paired_frame.to_csv(out_dir / "paired_differences.csv")
     bootstrap_frame.to_csv(out_dir / "bootstrap_results.csv", index=False)
     matrix.to_csv(out_dir / "mae_matrix.csv")
-    (out_dir / "analysis.json").write_text(json.dumps(payload, indent=2, default=str))
-    (out_dir / "decision.json").write_text(json.dumps(decision.as_dict(), indent=2, default=str))
+    (out_dir / "analysis.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    (out_dir / "decision.json").write_text(json.dumps(decision.as_dict(), indent=2, default=str), encoding="utf-8")
     return payload

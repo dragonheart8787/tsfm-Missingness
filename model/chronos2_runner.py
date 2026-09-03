@@ -239,8 +239,11 @@ class MockForecaster:
             input_patch_stride=16,
             output_patch_size=16,
             model_context_length=8192,
-            max_output_patches=8,
-            model_prediction_length=1024,
+            # Self-consistent: model_prediction_length IS
+            # max_output_patches * output_patch_size in the real pipeline, and a
+            # mock that disagreed would mask the long-horizon contract check.
+            max_output_patches=64,
+            model_prediction_length=64 * 16,
             quantiles=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
             use_arcsinh=False,
             device="cpu",

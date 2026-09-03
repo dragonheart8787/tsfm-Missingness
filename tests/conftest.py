@@ -23,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 @pytest.fixture(scope="session")
 def config() -> dict:
-    return yaml.safe_load((REPO_ROOT / "configs" / "pilot_config.yaml").read_text())
+    return yaml.safe_load((REPO_ROOT / "configs" / "pilot_config.yaml").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")

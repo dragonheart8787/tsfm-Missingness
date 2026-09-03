@@ -49,21 +49,21 @@ def main() -> int:
     args = parser.parse_args()
 
     config_path = REPO_ROOT / args.config
-    config = yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     model_id = config["model"]["hf_model_id"]
 
     if args.write_revision or not config["model"].get("revision"):
         revision = resolve_revision(model_id)
         print(f"Resolved {model_id} HEAD commit: {revision}")
         if args.write_revision:
-            text = config_path.read_text()
+            text = config_path.read_text(encoding="utf-8")
             current = config["model"].get("revision")
             needle = "revision: null" if not current else f'revision: "{current}"'
             if needle not in text:
                 raise SystemExit(f"could not locate `{needle}` in {args.config} to pin the revision")
-            config_path.write_text(text.replace(needle, f'revision: "{revision}"', 1))
+            config_path.write_text(text.replace(needle, f'revision: "{revision}"', 1), encoding="utf-8")
             print(f"Pinned model.revision={revision} into {args.config}")
-            config = yaml.safe_load(config_path.read_text())
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         else:
             config["model"]["revision"] = revision
 

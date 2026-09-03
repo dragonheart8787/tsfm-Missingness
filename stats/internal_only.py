@@ -860,6 +860,6 @@ def analyse_internal_only(
         },
     }
     (out_dir / "internal_only_analysis.json").write_text(
-        json.dumps(payload, indent=2, default=str)
+        json.dumps(payload, indent=2, default=str), encoding="utf-8"
     )
     return payload

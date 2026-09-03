@@ -1,0 +1,149 @@
+# =============================================================================
+# Trailing-gap mechanism experiment — DRAFT, PENDING RESEARCH LEAD SIGN-OFF.
+#
+# NOT YET EXECUTED. No forecasts have been produced under this configuration.
+#
+# This file declares ONLY what is new to this experiment. Every shared
+# convention — bootstrap settings, the equivalence band (SESOI), the dataset,
+# the model contract, L/H/stride — is READ FROM configs/pilot_config.yaml and
+# is never redefined here. configs/pilot_config.yaml is not modified by this
+# experiment.
+# =============================================================================
+
+meta:
+  name: "trailing-gap-mechanism-v1"
+  status: "DRAFT — awaiting Research Lead sign-off. Not executed."
+  preregistration: "docs/preregistration_trailing_gap_mechanism_v1.md"
+  inherits_from: "configs/pilot_config.yaml"
+  # What is inherited rather than restated, so it cannot drift:
+  inherited_keys:
+    - "design.context_length"          # L = 320
+    - "design.horizon"                 # H = 96
+    - "design.stride"                  # 96
+    - "design.expected_origins"        # 178
+    - "dataset.*"
+    - "model.*"                        # including the pinned revision + patch grid
+    - "statistics.bootstrap.*"         # moving-block, 4/8/12, 5000 replicates
+    - "decision.no_go.equivalence_band_frac_of_clean_mae"   # the SESOI, +/-3%
+
+design:
+  # PREREGISTERED gap lengths. All must be whole multiples of the model's
+  # verified patch size; asserted at build time, never assumed.
+  gap_lengths: [16, 32, 64, 128]
+  # internal_block(g) sits at a FIXED distance for every g, so that exactly one
+  # full real patch always separates the block from the forecast boundary
+  # regardless of gap length. Holding this constant is the point: it keeps the
+  # "boundary intact" arm comparable across g.
+  internal_block_distance: 16
+  conditions_per_gap: ["trailing_nan", "truncated_long", "internal_block"]
+  # 1 clean + 4 gaps x 3 conditions = 13 per origin.
+  expected_conditions_per_origin: 13
+  # 178 origins x 13 = 2314. Asserted at RUN time, not now.
+  expected_total_forecasts: 2314
+
+truncated_long:
+  # The corrected design. The naive version (context of L-g, predict H) would
+  # have the model forecast [L-g, L-g+H) while the pilot scored [L, L+H) — a
+  # g-step timestamp misalignment invalidating every comparison in that arm.
+  #
+  #   context            = original_context[:L-g]      (real observations, no NaN)
+  #   prediction_length  = H + g                        (NOT H)
+  #   scored_prediction  = prediction[g : g+H]          (drop the first g steps)
+  #   ground truth       = the original, unchanged H-step target
+  request_extra_steps: true
+  drop_leading_predicted_steps: true
+  # H+g must fit in the model's SINGLE-SHOT output. If it does not, Chronos-2
+  # falls back to autoregressive unrolling — a different inference regime, and a
+  # contract violation under the original pilot's rules. This is a HARD STOP,
+  # never a warning to be ignored.
+  forbid_autoregressive_unroll: true
+  # Passed to the pipeline so the library itself raises instead of warning.
+  limit_prediction_length: true
+
+preconditions_for_execution:
+  # Documented preconditions. NOT run today.
+  reverify_model_contract: true
+  reverify_clean_against_original_run: true
+  clean_audit_tolerance_note: >-
+    Before any new result is trusted, the clean condition must be re-run and
+    its predictions checksum/tolerance-audited against the original pilot's
+    clean predictions, to catch environment drift (model revision, dependency
+    versions, hardware) since the original run.
+  submit_for_independent_review:
+    - "executed config"
+    - "run manifest"
+    - "summary statistics"
+  review_note: >-
+    The Research Lead cannot recompute values that live only in an uncommitted
+    results/ directory. Summaries — not just code — must reach the reviewer.
+
+contrasts:
+  # PRIMARY: own Holm family of 4, independent of every prior family.
+  - id: "R_16"
+    family: "R"
+    gap: 16
+    label: "R_16 = MAE(trailing_nan(16)) - MAE(truncated_long(16))"
+    minuend: {kind: "trailing_nan", g: 16}
+    subtrahend: {kind: "truncated_long", g: 16}
+  - id: "R_32"
+    family: "R"
+    gap: 32
+    label: "R_32 = MAE(trailing_nan(32)) - MAE(truncated_long(32))"
+    minuend: {kind: "trailing_nan", g: 32}
+    subtrahend: {kind: "truncated_long", g: 32}
+  - id: "R_64"
+    family: "R"
+    gap: 64
+    label: "R_64 = MAE(trailing_nan(64)) - MAE(truncated_long(64))"
+    minuend: {kind: "trailing_nan", g: 64}
+    subtrahend: {kind: "truncated_long", g: 64}
+  - id: "R_128"
+    family: "R"
+    gap: 128
+    label: "R_128 = MAE(trailing_nan(128)) - MAE(truncated_long(128))"
+    minuend: {kind: "trailing_nan", g: 128}
+    subtrahend: {kind: "truncated_long", g: 128}
+  # SECONDARY: own Holm family of 4, independent of R and of every prior family.
+  - id: "B_16"
+    family: "B"
+    gap: 16
+    label: "B_16 = MAE(trailing_nan(16)) - MAE(internal_block(16, d=16))"
+    kind: "confounded_with_removed_content"
+    minuend: {kind: "trailing_nan", g: 16}
+    subtrahend: {kind: "internal_block", g: 16}
+  - id: "B_32"
+    family: "B"
+    gap: 32
+    label: "B_32 = MAE(trailing_nan(32)) - MAE(internal_block(32, d=16))"
+    kind: "confounded_with_removed_content"
+    minuend: {kind: "trailing_nan", g: 32}
+    subtrahend: {kind: "internal_block", g: 32}
+  - id: "B_64"
+    family: "B"
+    gap: 64
+    label: "B_64 = MAE(trailing_nan(64)) - MAE(internal_block(64, d=16))"
+    kind: "confounded_with_removed_content"
+    minuend: {kind: "trailing_nan", g: 64}
+    subtrahend: {kind: "internal_block", g: 64}
+  - id: "B_128"
+    family: "B"
+    gap: 128
+    label: "B_128 = MAE(trailing_nan(128)) - MAE(internal_block(128, d=16))"
+    kind: "confounded_with_removed_content"
+    minuend: {kind: "trailing_nan", g: 128}
+    subtrahend: {kind: "internal_block", g: 128}
+
+mechanism_rule:
+  # DRAFT thresholds. NOT AUTHORITATIVE — awaiting Research Lead sign-off.
+  status: "PROPOSAL — thresholds not yet approved"
+  # Fraction of R_g values that must agree for a classification to be called
+  # consistent across gap lengths.
+  min_consistent_gaps: 3
+  # Dose-response: slope of R_g against g, bootstrapped across origins.
+  dose_response:
+    method: "per_origin_ols_slope_of_R_against_g"
+    # PROPOSAL: test the monotonic/linear trend as primary, and assess
+    # nonlinearity as a secondary descriptive check. See the preregistration
+    # document, which flags this specific choice for sign-off.
+    primary: "linear_slope"
+    secondary_nonlinearity: "quadratic_term_and_per_gap_pattern"

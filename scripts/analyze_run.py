@@ -36,7 +36,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    config = yaml.safe_load((REPO_ROOT / args.config).read_text())
+    config = yaml.safe_load((REPO_ROOT / args.config).read_text(encoding="utf-8"))
     out_dir = REPO_ROOT / args.out_dir if args.out_dir else None
     payload = analyse(
         REPO_ROOT / args.run_dir,

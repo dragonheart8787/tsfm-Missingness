@@ -272,7 +272,7 @@ def test_source_contains_no_nan_to_zero_collapse():
     """Static guard against the exact v1 idiom returning anywhere."""
     from pathlib import Path
 
-    source = Path("stats/decision.py").read_text()
+    source = Path("stats/decision.py").read_text(encoding="utf-8")
     assert 'if np.isfinite(stat.rho_distance) else 0.0' not in source
     assert 'if np.isfinite(s.rho_distance) else 0.0' not in source
 
@@ -473,16 +473,16 @@ def test_reanalysis_refuses_to_overwrite_a_different_rule_version(tmp_path, conf
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "decision.json").write_text(
-        json.dumps({"decision_rule_version": "v1", "label": "PIVOT"})
+        json.dumps({"decision_rule_version": "v1", "label": "PIVOT"}), encoding="utf-8"
     )
     # Deliberately unreadable inputs: the guard must fire BEFORE any analysis.
-    (run_dir / "window_results.csv").write_text("")
-    (run_dir / "mask_diagnostics.csv").write_text("")
+    (run_dir / "window_results.csv").write_text("", encoding="utf-8")
+    (run_dir / "mask_diagnostics.csv").write_text("", encoding="utf-8")
 
     with _pytest.raises(FileExistsError, match="produced by decision rule v1"):
         analyse(run_dir, config)
 
-    preserved = json.loads((run_dir / "decision.json").read_text())
+    preserved = json.loads((run_dir / "decision.json").read_text(encoding="utf-8"))
     assert preserved["decision_rule_version"] == "v1"
     assert preserved["label"] == "PIVOT"
 
@@ -495,13 +495,13 @@ def test_reanalysis_into_a_separate_out_dir_is_not_blocked(tmp_path, config):
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    (run_dir / "decision.json").write_text(json.dumps({"decision_rule_version": "v1"}))
-    (run_dir / "window_results.csv").write_text("")
-    (run_dir / "mask_diagnostics.csv").write_text("")
+    (run_dir / "decision.json").write_text(json.dumps({"decision_rule_version": "v1"}), encoding="utf-8")
+    (run_dir / "window_results.csv").write_text("", encoding="utf-8")
+    (run_dir / "mask_diagnostics.csv").write_text("", encoding="utf-8")
 
     # The guard does not fire for a clean out_dir; analysis then fails on the
     # empty CSVs, which is a different error entirely.
     with pytest.raises(Exception) as excinfo:
         analyse(run_dir, config, out_dir=tmp_path / "post_hoc")
     assert not isinstance(excinfo.value, FileExistsError)
-    assert json.loads((run_dir / "decision.json").read_text())["decision_rule_version"] == "v1"
+    assert json.loads((run_dir / "decision.json").read_text(encoding="utf-8"))["decision_rule_version"] == "v1"

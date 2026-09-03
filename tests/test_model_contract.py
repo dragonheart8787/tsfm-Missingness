@@ -112,7 +112,7 @@ def test_inference_wrapper_requests_q05_explicitly():
     chronos-forecasting names it `mean` while in fact returning the q=0.5
     column; relying on that name would be relying on an implementation detail.
     """
-    source = Path("model/chronos2_runner.py").read_text()
+    source = Path("model/chronos2_runner.py").read_text(encoding="utf-8")
     assert "quantile_levels=[self._quantile_level]" in source
     assert "_mean" in source, "the convenience return must be explicitly discarded"
     assert "cross_learning=self._cross_learning" in source

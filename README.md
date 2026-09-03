@@ -53,7 +53,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 # 2. Dataset (already validated; re-runs are idempotent)
 .venv/bin/python data/fetch_etth1.py --config configs/pilot_config.yaml
 
-# 3. Tests — 172 non-model tests + 3 real-model tests (require GPU/model access) = 175 total.
+# 3. Tests — 209 non-model tests + 3 real-model tests (require GPU/model access) = 212 total.
 #    The non-model tests all pass on CPU with the model mocked at the
 #    inference boundary; the 3 real-model tests need weights.
 .venv/bin/python -m pytest tests/ -v -m "not requires_model"
@@ -143,7 +143,9 @@ stats/                      bootstrap.py, contrasts.py, decision.py, analyze.py
 diagnostics/confounders.py  per-mask confounder table
 runner/                     windows.py (read-only targets), run_pilot.py (resumable)
 scripts/                    verify_model_contract.py, analyze_run.py, make_figures.py
-tests/                      172 non-model + 3 real-model (requires_model) = 175
+experiments/trailing_gap.py draft next-round conditions (NOT executed)
+stats/mechanism_decision.py draft mechanism rule (NOT authoritative)
+tests/                      209 non-model + 3 real-model (requires_model) = 212
 report/audit_report.md      interpretation-discipline report
 docs/                       ENVIRONMENT.md, SCHEMA.md
 ```
@@ -155,6 +157,18 @@ docs/                       ENVIRONMENT.md, SCHEMA.md
 * [`report/audit_report.md`](report/audit_report.md) — the decision, the live alternative explanations, and what this design can and cannot separate.
 * [`docs/SCHEMA.md`](docs/SCHEMA.md) — output file schemas.
 * [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) — environment, pinning, determinism.
+
+## Next round (not executed)
+
+`docs/preregistration_trailing_gap_mechanism_v1.md` — a **draft preregistration**
+for the trailing-gap mechanism experiment, submitted for Research Lead review.
+It would separate loss of recent observations from effective-horizon extension
+from Chronos-2-specific trailing-missingness handling.
+
+Conditions and the draft classification rule are implemented and tested
+(`experiments/trailing_gap.py`, `stats/mechanism_decision.py`), but **nothing
+has been executed** — the design is gated on sign-off. The document marks each
+item FROZEN or AWAITING SIGN-OFF.
 
 ## Scope exclusions
 
