@@ -75,6 +75,10 @@ model:
   # in a call. It must be False, and we additionally submit one origin per call.
   cross_learning: false
   forecasts_per_call: 1
+  # Forwarded to Chronos2Pipeline.predict on every call. The library defaults
+  # this to False, where an over-long prediction_length only WARNS and then
+  # silently unrolls autoregressively. True makes it raise instead.
+  limit_prediction_length: true
   # PREREGISTERED ASSUMPTION about the model's patch grid. All block positions
   # below are aligned to this. The runner reads the real value from the loaded
   # checkpoint's chronos_config and HARD-FAILS if it differs, rather than

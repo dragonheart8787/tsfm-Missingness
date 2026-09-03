@@ -119,13 +119,21 @@ def preflight(
     """
     violations: list[str] = []
     patch = int(contract.input_patch_size)
-    single_shot = int(contract.max_output_patches) * int(contract.output_patch_size)
 
-    if single_shot != int(contract.model_prediction_length):
+    # The usable single-shot horizon is the MINIMUM of the two fields the
+    # contract reports. They currently agree (1024 and 64 x 16 = 1024), but the
+    # formula must not hardcode that agreement: if a future checkpoint reports a
+    # smaller model_prediction_length than its patch arithmetic implies, or vice
+    # versa, the smaller number is the one that binds.
+    patch_capacity = int(contract.max_output_patches) * int(contract.output_patch_size)
+    single_shot = min(int(contract.model_prediction_length), patch_capacity)
+
+    if patch_capacity != int(contract.model_prediction_length):
         violations.append(
             f"contract is internally inconsistent: model_prediction_length="
             f"{contract.model_prediction_length} but max_output_patches x "
-            f"output_patch_size={single_shot}."
+            f"output_patch_size={patch_capacity}. Using the smaller "
+            f"({single_shot}) as the binding limit."
         )
 
     if context_length % patch != 0:
@@ -152,9 +160,10 @@ def preflight(
         if horizon + g > single_shot:
             violations.append(
                 f"g={g}: truncated_long requires prediction_length={horizon + g}, which "
-                f"exceeds the model's single-shot output of {single_shot} "
-                f"({contract.max_output_patches} output patches x "
-                f"{contract.output_patch_size}). Chronos-2 would fall back to "
+                f"exceeds the model's binding single-shot limit of {single_shot} "
+                f"= min(model_prediction_length={contract.model_prediction_length}, "
+                f"{contract.max_output_patches} x {contract.output_patch_size}"
+                f"={patch_capacity}). Chronos-2 would fall back to "
                 f"AUTOREGRESSIVE UNROLLING — a different inference regime and a contract "
                 f"violation. HARD STOP: this gap length is not executable as specified."
             )
@@ -301,7 +310,10 @@ def build_conditions(
         )
 
     patch = int(contract.input_patch_size)
-    single_shot = int(contract.max_output_patches) * int(contract.output_patch_size)
+    single_shot = min(
+        int(contract.model_prediction_length),
+        int(contract.max_output_patches) * int(contract.output_patch_size),
+    )
 
     conditions = [build_clean(context=context, horizon=horizon)]
     for gap in gaps:

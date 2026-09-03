@@ -109,6 +109,13 @@ class Chronos2Forecaster:
                 "every task in a call and would break per-origin isolation."
             )
         self._quantile_level = float(model_cfg.get("quantile_level", 0.5))
+        # Passed through to Chronos2Pipeline.predict on EVERY call. The library
+        # defaults this to False, in which case an over-long prediction_length
+        # only warns and then silently unrolls autoregressively - a different
+        # inference regime. True makes the library raise instead.
+        self._limit_prediction_length = bool(
+            model_cfg.get("limit_prediction_length", True)
+        )
 
         chronos_config = self._pipeline.model.chronos_config
         actual_dtype = str(next(self._pipeline.model.parameters()).dtype).replace("torch.", "")
@@ -158,6 +165,10 @@ class Chronos2Forecaster:
                 quantile_levels=[self._quantile_level],
                 cross_learning=self._cross_learning,
                 batch_size=1,
+                # Forwarded through predict_quantiles into predict. Without it
+                # the library silently falls back to autoregressive unrolling
+                # for a long horizon; with it, it raises.
+                limit_prediction_length=self._limit_prediction_length,
             )
         # shape: (n_variates=1, horizon, n_quantile_levels=1)
         prediction = quantiles[0]

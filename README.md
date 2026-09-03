@@ -53,7 +53,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 # 2. Dataset (already validated; re-runs are idempotent)
 .venv/bin/python data/fetch_etth1.py --config configs/pilot_config.yaml
 
-# 3. Tests — 214 non-model tests + 3 real-model tests (require GPU/model access) = 217 total.
+# 3. Tests — 261 non-model tests + 3 real-model tests (require GPU/model access) = 264 total.
 #    The non-model tests all pass on CPU with the model mocked at the
 #    inference boundary; the 3 real-model tests need weights.
 .venv/bin/python -m pytest tests/ -v -m "not requires_model"
@@ -145,7 +145,7 @@ runner/                     windows.py (read-only targets), run_pilot.py (resuma
 scripts/                    verify_model_contract.py, analyze_run.py, make_figures.py
 experiments/trailing_gap.py draft next-round conditions (NOT executed)
 stats/mechanism_decision.py draft mechanism rule (NOT authoritative)
-tests/                      214 non-model + 3 real-model (requires_model) = 217
+tests/                      261 non-model + 3 real-model (requires_model) = 264
 report/audit_report.md      interpretation-discipline report
 docs/                       ENVIRONMENT.md, SCHEMA.md
 ```

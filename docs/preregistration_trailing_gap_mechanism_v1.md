@@ -184,7 +184,7 @@ Interpretation — **AWAITING SIGN-OFF** as a set of readings, not yet a decisio
 |---|---|
 | `R_g` inside the equivalence band | An **effective-horizon-only** story: trailing NaNs cost nothing beyond the lost recency |
 | `R_g > 0`, outside the band | An **extra penalty** specific to the explicit trailing-NaN representation, masking, or position handling |
-| `R_g < 0`, outside the band | The explicit NaN framing **outperforms** the truncated-autoregressive framing |
+| `R_g < 0`, outside the band | The explicit NaN framing **outperforms** the shorter-context/longer-horizon single-shot framing |
 
 "Consistent with" is the strongest available reading. None of these is a
 demonstrated mechanism, and no report may upgrade them to one.
@@ -375,13 +375,46 @@ All in `tests/test_trailing_gap.py`, all passing, all model-mocked:
 | `g=128` executability (§3.2) | **RESOLVED** — capacity 1,024 vs. a 224-step maximum; cheap re-verification retained as a precondition |
 | Matrix, 2,314 forecasts (§4) | **FROZEN** |
 | `R_g` / `B_g` definitions and Holm families (§5) | **FROZEN** |
-| `R_g` interpretation readings (§5.1) | **AWAITING SIGN-OFF** |
+| `R_g` interpretation readings (§5.1) | **FROZEN** — four-way against the SESOI; interpretation text verbatim |
 | `B_g` confounding label (§5.2) | **FROZEN** |
 | SESOI ±3%, inherited (§6) | **FROZEN** |
 | Dose-response method (§7) | **FROZEN** |
-| Linear primary vs. nonlinear (§7) | **AWAITING SIGN-OFF** — most worth overruling |
+| Dose-response: linear primary, x = missing patches (§7) | **FROZEN** — sub-question only; never feeds the classification |
 | Bootstrap and multiplicity (§8) | **FROZEN** |
-| Classification rule structure (§9) | **DRAFT** |
-| Classification thresholds (§9) | **AWAITING SIGN-OFF** — not authoritative |
+| Classification rule structure and precedence (§9) | **FROZEN** — `preregistered-v1` |
+| Classification thresholds (§9) | **FROZEN** — `min_consistent_gaps=3` (rules 3-4), `equivalence_required_gaps=4` (rule 2) |
 | Execution preconditions (§10) | **FROZEN** |
 | Results-delivery requirement (§10.1) | **FROZEN** |
+
+
+---
+
+## 13. Frozen for execution
+
+The three items previously marked AWAITING SIGN-OFF are now **frozen**, per the
+Research Lead's conditional-GO corrections:
+
+* **§5.1** — per-gap classification is **four-way** against `delta = 0.03 x
+  mean_clean_mae`: EQUIVALENT / MATERIAL_POSITIVE / MATERIAL_NEGATIVE /
+  UNRESOLVED. `ci_low_holm > 0` is **not** sufficient for MATERIAL_POSITIVE; the
+  bound must clear `+delta`. Interpretation text is fixed verbatim and travels
+  with every reading.
+* **§7** — the linear slope is the primary statistic for the **dose-response
+  sub-question only**, never primary evidence for the experiment; computed
+  against `x = g / patch_size` (missing patches). It never feeds the
+  classification. Curvature is descriptive only. A non-significant slope means
+  only "no detected linear trend".
+* **§9** — precedence fixed: direction reversal, then family-wise equivalence
+  (an **intersection** over all four gaps), then the two 3-of-4 directional
+  readings, then INCONCLUSIVE with exactly one machine-readable reason.
+
+`rule_version: preregistered-v1`, `authoritative: True`.
+
+**`authoritative: True` means the DECISION RULE was preregistered** — its
+thresholds and precedence were fixed before any forecast, so the classification
+cannot have been tuned to the data. **It does NOT mean any resulting causal
+interpretation is authoritative.** No label produced by this rule isolates
+masking, normalization, positional handling, or any other internal component.
+
+Execution follows `docs/gpu_execution_runbook_trailing_gap.md`, whose steps 2
+and 4 are hard stops.

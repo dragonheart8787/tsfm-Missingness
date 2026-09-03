@@ -134,14 +134,19 @@ contrasts:
     subtrahend: {kind: "internal_block", g: 128}
 
 mechanism_rule:
-  # DRAFT thresholds. NOT AUTHORITATIVE — awaiting Research Lead sign-off.
-  status: "PROPOSAL — thresholds not yet approved"
-  # Fraction of R_g values that must agree for a classification to be called
-  # consistent across gap lengths.
+  # FROZEN BEFORE GPU EXECUTION. rule_version: preregistered-v1.
+  status: "FROZEN — thresholds fixed before any forecast was produced"
+  # Governs ONLY the two directional classifications (rules 3-4).
   min_consistent_gaps: 3
+  # Governs ONLY family-wise equivalence (rule 2). Equivalence is an
+  # INTERSECTION across all four gaps; a 3-of-4 subset is not family-wise
+  # equivalence without a separately adjusted procedure.
+  equivalence_required_gaps: 4
   # Dose-response: slope of R_g against g, bootstrapped across origins.
   dose_response:
-    method: "per_origin_ols_slope_of_R_against_g"
+    # x = g / patch_size, i.e. MISSING PATCHES. Equivalent linearity to raw g,
+    # but the slope is then per-patch and directly interpretable.
+    method: "per_origin_ols_slope_of_R_against_missing_patches"
     # PROPOSAL: test the monotonic/linear trend as primary, and assess
     # nonlinearity as a secondary descriptive check. See the preregistration
     # document, which flags this specific choice for sign-off.
