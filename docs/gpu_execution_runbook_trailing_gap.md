@@ -2,7 +2,7 @@
 
 **For a human to run on the GPU host, in order. Do not skip or reorder steps.**
 
-Steps 2 and 4 are **hard stops**: if either fails, stop and report. Do not
+Steps 2, 3.0, and 4 are **hard stops**: if any fails, stop and report. Do not
 select a tolerance after seeing a discrepancy — a mismatch is a stop, not a
 tuning problem.
 
@@ -80,15 +80,23 @@ into, silently mixing cells from two different runs.
 
 ```bash
 # Wrapped in a subshell so the `exit` cannot close your login shell when pasted.
-( test -e results/trailing_gap_v1 && {
+# The subshell is the FINAL command: its status is the block's status, so a
+# script wrapping this in `|| abort` actually halts. Do not append anything
+# after it -- a trailing `echo` would mask the status with its own 0.
+(
+  if test -e results/trailing_gap_v1; then
     echo "HARD STOP: results/trailing_gap_v1 already exists."
     echo "Do not delete, overwrite, or reuse it. Report it and await instruction."
     ls -la results/trailing_gap_v1
     exit 1
-  }
-  echo "OK: no existing run directory; safe to initialize." )
-echo "guard exit status: $?    # 0 = safe to proceed, 1 = HARD STOP"
+  fi
+  echo "OK: no existing run directory; safe to initialize."
+)
 ```
+
+The block returns **0** when the directory is absent and **1** when it exists,
+and leaves your interactive shell alive in both cases. To read the status
+explicitly, run `echo $?` **as a separate command** afterwards.
 
 > **HARD STOP.** If the directory exists, stop and report. **Do not delete it,
 > do not overwrite it, and do not silently reuse it** — it may hold results
@@ -202,7 +210,7 @@ classification.
 
 ---
 
-## Quick reference — the two hard stops
+## Quick reference — the three hard stops
 
 | Step | Condition | Action on failure |
 |---|---|---|
