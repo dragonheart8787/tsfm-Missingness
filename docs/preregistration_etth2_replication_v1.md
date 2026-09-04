@@ -1,12 +1,23 @@
 # Preregistration v1 — ETTh2/OT trailing-gap replication
 
-> **STATUS: DRAFT SUBMITTED FOR RESEARCH LEAD SIGN-OFF. NOT IMPLEMENTED, NOT RUN.**
+> **STATUS: FROZEN AND PREREGISTERED. IMPLEMENTED, NOT YET RUN.**
 >
-> No config change, no data-fetch script, no implementation, no execution exists
-> for this document. ETTh2 has not been downloaded. Nothing here is frozen until
-> signed off; on sign-off, every item below becomes frozen and changeable only
-> by numbered amendment, as in
-> `docs/preregistration_trailing_gap_mechanism_v1.md`.
+> **Signed off** by the Research Lead against reference commit
+> `5b62949d5faff25d9dc712ee8f711b19f24fceed`, on **2026-09-04**.
+>
+> The scientific design — sections 0 to 9 as revised in that commit — is now
+> **frozen**, pending only implementation. It is changeable from here only by
+> **numbered amendment**, as in
+> `docs/preregistration_trailing_gap_mechanism_v1.md`. That covers the gap
+> lengths, the SESOI, the bootstrap settings, the primary intersection
+> hypothesis, the classification thresholds, the multiplicity treatment, the
+> clean control and the three replication outcomes.
+>
+> **What has changed since sign-off is implementation and recorded fact, not
+> design.** ETTh2 has been downloaded and validated; its measured properties
+> are recorded in **factual amendment A1** below. The config, fetcher, runner,
+> analysis and decision rule exist. **No ETTh2 forecast has been produced.**
+> Real execution requires a separate, explicit Research Lead approval.
 
 ---
 
@@ -112,9 +123,16 @@ clean nor byte-comparable across conditions.
 Handling native missingness is a **design question requiring its own
 preregistered decision**, not an implementation detail.
 
-**Not yet done:** ETTh2 has not been fetched, and its checksum, row count and
-native-missing count are therefore unknown at the time of writing. They must be
-recorded by amendment before execution.
+**Done, and recorded in amendment A1 (2026-09-04).** ETTh2 has been fetched and
+validated. Its `OT` column carries **zero** native missing values, so the hard
+stop did not fire — it was **executed and passed**, not skipped. The checksum,
+row count, timestamp range and derived origin count are in A1.
+
+The gate stays armed at run time. It is not a one-off acceptance check: it runs
+at the top of **every** phase of the runner, before any model is loaded, and it
+**raises** rather than logging. A swapped, truncated or corrupted ETTh2 halts
+the pipeline at that point. See `data/fetch_etth2.assert_no_native_missingness`
+and `experiments/run_etth2.native_missingness_gate`.
 
 ---
 
@@ -318,18 +336,108 @@ hypothesis of §0 into an a priori one.
 
 ---
 
-## 10. Summary of what needs a decision before execution
+## A. Factual amendments
+
+Dated, additive records of facts measured after sign-off. **An amendment records
+what was measured; it never rewrites a design section.** Sections 0 to 9 above
+are unchanged by anything here.
+
+### A1 — ETTh2 dataset contract and derived origin count (2026-09-04)
+
+Recorded after fetching and validating the canonical file. Every value was
+**measured**, none assumed.
+
+| Fact | Value |
+|---|---|
+| Source | `https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh2.csv` |
+| Local path | `data/raw/ETTh2.csv` (uncommitted, per `.gitignore`) |
+| sha256 | `a3dc2c597b9218c7ce1cd55eb77b283fd459a1d09d753063f944967dd6b9218b` |
+| Row count | 17,420 |
+| Target column | `OT` |
+| Timestamp range | 2016-07-01 00:00:00 → 2018-06-26 19:00:00 |
+| Timestamps monotonic increasing | true |
+| Timestamps unique | true |
+| Gaps in the hourly grid | 0 |
+| Inferred frequency | `h` (matches the expected `1h`) |
+| **Native missing values in `OT`** | **0** |
+| Native missing values, all other columns | 0 |
+| `OT` min / max / mean / std | −2.6465 / 58.8770 / 26.6094 / 11.8879 |
+
+**The native-missingness hard stop did not fire.** ETTh2 was **confirmed** to
+share ETTh1's zero-native-missingness property; §2.1's hard stop was executed
+and passed, not skipped. The gate remains armed at run time — it runs at the top
+of every phase, before any model load, and raises rather than warning.
+
+**Derived origin count: 178**, from ETTh2's own 17,420 rows at L=320, H=96,
+stride=96:
+
+```
+last_start = 17420 - 320 - 96 = 17004
+origins    = len(range(0, 17004 + 1, 96)) = 178
+```
+
+computed with `runner.windows.enumerate_origins` — the same enumeration the
+runner uses at execution time, not a parallel formula.
+
+**That this equals ETTh1's 178 is a consequence, not an inheritance.** The two
+files happen to have the same row count. The derivation is sensitive to length:
+17,408 rows still yields 178, 17,407 yields 177, and 17,311 yields 176.
+`tests/test_etth2_dataset.py` asserts both the derived value against the real
+file and that sensitivity, so the number cannot be right by coincidence.
+
+**Matrix size implied by A1**, asserted at run time and unchanged from the
+inherited design: 178 origins × 13 conditions = **2,314 forecasts**, of which
+178 are clean. The `clean_reference` run adds a further 178 clean forecasts that
+are **QC-only and excluded from the analysis**.
+
+**Dataset distinctness.** ETTh2's sha256 differs from ETTh1's
+(`f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066`), and the
+two target series differ elementwise. A replication run against a copy of ETTh1
+would be worthless; `tests/test_etth2_dataset.py` checks this rather than
+assuming it.
+
+**Model contract: unchanged, and confirmed rather than assumed.** The pinned
+revision `29ec3766d36d6f73f0696f85560a422f50e8498c`, the patch grid
+(16/16/16, 64 output patches) and the 1,024-step single-shot horizon are
+inherited from `configs/pilot_config.yaml` and re-asserted by
+`tests/test_etth2_config.py`, including that `H + g` still fits a single forward
+pass for every gap. The **real-checkpoint** re-verification
+(`tests/test_model_contract.py`, `requires_model`) could not run in the
+implementation environment — its network policy denies `huggingface.co` — and
+**must be run on the GPU host before execution**.
+
+---
+
+## 10. Sign-off status of every item
+
+Signed off against commit `5b62949d5faff25d9dc712ee8f711b19f24fceed` on
+2026-09-04. Every design item below is **FROZEN**: changeable only by numbered
+amendment. Nothing in this table is open.
 
 | Item | Status |
 |---|---|
-| Design inherited from F3, dataset changed only (§1) | **Proposed** |
-| ETTh2 origin count | **Unknown — must be derived and recorded by amendment** |
-| Primary hypothesis: `R_16 ∧ R_32 ∧ R_64` equivalent (§5) | **Proposed** |
-| Provenance label as an exploratorily generated hypothesis (§0, §5) | **Proposed, and not negotiable in substance** |
-| Multiplicity treatment of the three-gap intersection (§5.1) | **RESOLVED in this version — sign off as written.** No correction on the intersection itself; Holm within `R` over material directional readings only; `B` corrected separately. `R` and `B` are not statistically independent and are not described as such. |
-| Replication decision criterion: REPLICATED / CONTRADICTED / INCONCLUSIVE (§5.2) | **NEW in this version — this is the part not inherited from F3.** CONTRADICTED takes precedence over the other two. |
-| Clean-condition control in the absence of a prior ETTh2 run (§8, precondition 4) | **RESOLVED in this version — sign off as written.** Independent `clean_reference` run; exact equality on the identity fields; no tolerance; QC-only and excluded from analysis. |
-| Native ETTh2 missingness > 0 is a hard stop (§2.1) | **RESOLVED in this version — sign off as written.** Not a repairable condition; execution does not start. |
-| `R_128` mandatory secondary (§6) | **Proposed** |
-| `B_g` secondary and content-confounded (§3.1) | **Carried forward verbatim** |
-| No pooled analysis; no new model/imputation/baseline (§7) | **Proposed** |
+| Design inherited from F3, dataset changed only (§1) | **FROZEN** |
+| ETTh2 dataset contract and origin count | **RECORDED — amendment A1.** 17,420 rows, sha256 `a3dc2c59…`, 0 native missing in `OT`, **178 derived** origins. Measured, not assumed. |
+| Primary hypothesis: `R_16 ∧ R_32 ∧ R_64` equivalent (§5) | **FROZEN** |
+| Provenance label as an exploratorily generated hypothesis (§0, §5) | **FROZEN, and not negotiable in substance** |
+| Multiplicity treatment of the three-gap intersection (§5.1) | **FROZEN.** No correction on the intersection itself; Holm within `R` over material directional readings only; `B` corrected separately. `R` and `B` are not assumed statistically independent, and no sign is claimed for the dependence. |
+| Replication decision criterion: REPLICATED / CONTRADICTED / INCONCLUSIVE (§5.2) | **FROZEN.** Implemented as `stats/replication_decision.py`, `rule_version: etth2-replication-v1`. CONTRADICTED takes precedence. |
+| Clean-condition control in the absence of a prior ETTh2 run (§8, precondition 4) | **FROZEN.** Independent `clean_reference` run; exact equality on the identity fields; no tolerance; QC-only and excluded from analysis. |
+| Native ETTh2 missingness > 0 is a hard stop (§2.1) | **FROZEN, and EXERCISED.** A1 records the measured zero. The gate runs at the top of every phase, before any model load, and raises. |
+| `R_128` mandatory secondary (§6) | **FROZEN.** Measured and reported; excluded from the primary decision. |
+| `B_g` secondary and content-confounded (§3.1) | **FROZEN — carried forward verbatim** |
+| No pooled analysis; no new model/imputation/baseline (§7) | **FROZEN** |
+
+### 10.1 What remains before execution
+
+Not design decisions — operational gates. See
+`docs/gpu_execution_runbook_etth2.md`.
+
+| Gate | State |
+|---|---|
+| Real-checkpoint contract re-verification on the GPU host | **OUTSTANDING.** Could not run where this was implemented; that environment's network policy denies `huggingface.co`. |
+| `clean_reference` run, all origins, own process and model load | **NOT RUN** |
+| Formal run's clean-only pass, second independent process | **NOT RUN** |
+| Exact clean-reference audit — the hard stop before any corrupted forecast | **NOT RUN** |
+| The remaining corrupted-condition forecasts | **NOT RUN** |
+| **Research Lead approval for real execution** | **REQUIRED, and separate from this sign-off.** Implementation sign-off is not execution approval. |
