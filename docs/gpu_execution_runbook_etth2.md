@@ -6,26 +6,31 @@
 > execution requires a **separate, explicit Research Lead approval**. Sign-off on
 > the preregistration froze the design; it did not authorise a forecast.
 
-Steps **2**, **3.0**, **4.0**, **6** and the native-missingness check inside
-every runner invocation are **hard stops**. If any fails, stop and report. **Do
-not select a tolerance after seeing a discrepancy** — a mismatch is a stop, not
-a tuning problem, and that applies to the identity fields as much as to the
-predictions.
+Steps **2**, **3**, **3.0**, **5**, **6** and **7**, plus the
+native-missingness check inside every runner invocation, are **hard stops**. If
+any fails, stop and report. **Do not select a tolerance after seeing a
+discrepancy** — a mismatch is a stop, not a tuning problem, and that applies to
+the identity fields as much as to the predictions.
 
-**Execution commit (E2): `c10beaf0ab7c10019c15415f5e85a65ab2cf0007`** — the current ETTh2
+> **Corrected numbering.** An earlier revision of this document listed "4.0" as
+> a hard stop. There is no §4.0; the clean-reference audit is **§5** and the
+> initialization guard is **§3.0**. The list above is the current, correct one
+> and matches the quick-reference table at the end.
+
+**Execution commit (E3): `75fe27445e5c6c7fd28b3b9cca28a5d000a2fe4c`** — the current ETTh2
 implementation freeze. This is what step 1 checks out and what every run
 manifest must record as executed.
 
-**E2 supersedes E1 (`881f1c5e04980309aafd5929ece06cbd62ea1ff0`) for execution.**
-E1 was never approved to run; E2 adds the hardening in preregistration amendment
-A2 — the shared-runner hard stop, correct manifest provenance, family-correct
-reporting built in, structurally unmistakable mock artifacts, a
-staleness-resistant clean-reference gate, truthful fetch exit codes, and
-exit-status propagation in the pipelines below. Do **not** execute E1.
+**E3 supersedes E2 (`c10beaf0ab7c10019c15415f5e85a65ab2cf0007`), which is
+NO-GO, and E1 (`881f1c5e04980309aafd5929ece06cbd62ea1ff0`) before it.** E3 fixes
+three interaction bugs found in E2 and recorded in preregistration amendment A3:
+a clean-reference gate that could not survive a resume, provenance that accepted
+a run as real by the mere absence of mock markers, and a `formal-full` pass that
+exited 0 with a failed cell in the matrix. Do **not** execute E1 or E2.
 
-This runbook ships in a later documentation commit (D6), which names E2 above.
-**D6 is never the executed commit** — no documentation commit ever is.
-If `git rev-parse HEAD` during a run does not equal E2, stop: the manifests
+This runbook ships in a later documentation commit (D7), which names E3 above.
+**D7 is never the executed commit** — no documentation commit ever is.
+If `git rev-parse HEAD` during a run does not equal E3, stop: the manifests
 would otherwise attribute results to the wrong tree.
 
 ---
@@ -55,7 +60,7 @@ Python session.
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/etth2-replication-v1
-git checkout c10beaf0ab7c10019c15415f5e85a65ab2cf0007    # E2, the current implementation freeze
+git checkout 75fe27445e5c6c7fd28b3b9cca28a5d000a2fe4c    # E3, the current implementation freeze
 git status --porcelain            # must print nothing
 git rev-parse HEAD                # must equal the execution commit; record it
 
@@ -278,6 +283,35 @@ without it, and refuses it if either field fails to match what step 6 itself
 loads — so a stale gate cannot authorise a run against different data or
 different weights.
 
+### 5.1 What the gate binds to — the clean-content invariant
+
+The gate also records, under `clean_content_digests`, a SHA256 per side per file
+of a **canonical projection of the clean rows only**:
+
+1. read `predictions_long.csv` and `window_results.csv` as text;
+2. keep only rows whose `condition_id` is `clean`;
+3. sort them by their keys — `(origin_id, step_index)` for predictions,
+   `(origin_id, condition_id)` for window results — with a stable sort;
+4. put the columns in sorted order, render to CSV, and hash.
+
+**Why a projection and not the whole file.** Step 6 appends
+corrupted-condition rows to those same files while building the 2,314-row
+matrix. A whole-file hash could not tell a tampered clean row from a
+legitimately appended corrupted one, so **every** append invalidated the gate —
+and an interrupted step 6 found its own prior legitimate progress reported as
+tampering. Resumability was broken outright. Everything outside the projection
+is now free to vary.
+
+**This is not a loosening of what the gate protects.** The projection contains
+every column of every clean row, so a changed value, a changed key, a removed
+clean row and an added clean row each change the digest. There is **no
+tolerance**: one differing character is a different hash and a hard stop. What
+changed is *what the invariant is about* — the audited clean content — not how
+strictly it is enforced.
+
+**A gate written before this change is refused, not silently accepted.** It
+records whole-file digests, which this version cannot verify; re-run step 5.
+
 ---
 
 ## 6. Only if step 5 passed exactly — the remaining forecasts
@@ -321,7 +355,18 @@ so a duplicated cell cannot mask a missing one.
 **If interrupted**, re-run the same command in the same directory. Resumption is
 decided from `window_results.csv` at origin × condition granularity; the
 checkpoint file is advisory and never gates it. Do **not** re-run the step 3.0
-guard.
+guard. The gate written in step 5 remains valid across the interruption and the
+resume — that is what §5.1's clean-content projection is for.
+
+> **HARD STOP — the process exit code.** On completion the runner asserts every
+> invariant above and **exits 6** if any is violated, including a single failed
+> cell (`rows_by_status` would then read `{"ok": 2313, "failed": 1}`). **No cell
+> is ever retried automatically.** A failure is surfaced at the process level
+> and left for you: re-running would hide both the failure and its cause. Read
+> the recorded `error_message` in `window_results.csv` and report it.
+>
+> Check the status explicitly — the pipeline below preserves it via
+> `PIPESTATUS[0]`, so a non-zero exit is visible rather than masked by `tee`.
 
 ---
 
@@ -350,8 +395,18 @@ Writes into `results/etth2_replication_v1/formal/analysis/`:
 * `etth2_analysis.json` — the full payload
 * the dose-response and paired-difference outputs, as on ETTh1
 
-`analyze_etth2.py` **refuses a mock run**, exiting 3. On a real run it needs no
-flag. If you ever pass `--allow-mock-analysis` for a pipeline exercise, every
+`analyze_etth2.py` establishes the run's provenance from **positive evidence**
+before doing anything: the manifest and the summary must both explicitly and
+consistently carry `mock_model`, the ETTh2 experiment identity, the
+`formal-full` phase, the expected entrypoint, and a real model revision.
+
+* **`INVALID_PROVENANCE` → exit 5.** Missing, partial, malformed or
+  contradictory provenance. **`--allow-mock-analysis` does NOT bypass this** —
+  that flag analyses a run whose mockness is *established*; broken provenance is
+  a different failure class, and salvaging it is not a decision this tool may
+  make. Re-run the phase or report the directory.
+* **Mock run → exit 3**, unless `--allow-mock-analysis` is passed.
+* A real run needs no flag. If you ever pass `--allow-mock-analysis` for a pipeline exercise, every
 artifact it writes is stamped `mock_model: true`,
 `scientifically_valid: false`, `authoritative_result: false`, and its outcome
 label is prefixed `MOCK_NOT_A_FINDING__` — such output must never be reported.
@@ -400,9 +455,11 @@ Raw per-forecast files may stay uncommitted. Summaries may not.
 | 5 | 3.0 | either run directory already exists | stop; do not delete, overwrite or reuse |
 | 6 | 5 | **any** clean-audit field differs | stop; do not select a tolerance, for any field |
 | 7 | 6 | gate file absent, failed, or mismatched | stop; the audit does not authorise this run |
-| 8 | 6 | clean artifacts changed since the audit passed | stop; the gate no longer describes the data on disk |
-| 9 | 6 | row / cell / origin counts ≠ 2314 / 2314 / 178 | stop; the matrix is incomplete or duplicated |
-| 10 | 7 | staged reporting fails verification | stop; nothing was promoted, and exit 4 says so |
+| 8 | 6 | the audited **clean rows** changed since the audit passed (§5.1) | stop; the gate no longer describes the clean data. Appended corrupted rows are NOT this |
+| 9 | 6 | gate predates the clean-content projection | stop; re-run step 5 to write a verifiable gate |
+| 10 | 6 | any completion invariant violated, incl. one failed cell | stop; **exit 6**. No cell is retried — read the recorded error |
+| 11 | 7 | `INVALID_PROVENANCE` | stop; **exit 5**. Not bypassable with `--allow-mock-analysis` |
+| 12 | 7 | staged reporting fails verification | stop; nothing was promoted, and exit 4 says so |
 
 **No step below a hard stop may be run until that stop is cleared by the
 Research Lead. Clearing means a decision, not a retry.**

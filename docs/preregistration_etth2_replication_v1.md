@@ -447,6 +447,107 @@ a separate, explicit Research Lead approval.
 
 ---
 
+### A3 — Three interaction bugs found in E2, and what the gate now binds to (2026-09-04)
+
+Recorded after the Research Lead ruled E2
+(`c10beaf0ab7c10019c15415f5e85a65ab2cf0007`) **NO-GO for execution**.
+**E3 (`75fe27445e5c6c7fd28b3b9cca28a5d000a2fe4c`) is the current execution
+commit; E1 and E2 must not be executed.**
+
+**This amendment changes no design decision.** Gap lengths, SESOI, bootstrap
+settings, the primary intersection hypothesis, the classification thresholds and
+every model setting are untouched. All three fixes are structural or procedural.
+Each was **reproduced before being fixed**, as every prior round in this project
+has required.
+
+#### A3.1 The clean-content invariant — what "the gate" now binds to
+
+This is the substantive change and it needs stating precisely, because *what the
+gate is a statement about* has changed.
+
+**Before (E2).** The gate recorded a SHA256 of the whole bytes of
+`predictions_long.csv` and `window_results.csv` on each side.
+
+**The failure.** `formal-full` appends corrupted-condition rows to those same
+files while building the 2,314-row matrix. A whole-file hash cannot distinguish
+"a clean row was tampered with" from "the run legitimately appended its own
+progress", so **any** append invalidated the gate. Reproduced: a `formal-full`
+limited to 10 origins wrote 298 cells; the resume then hard-stopped with
+`formal/predictions_long.csv has CHANGED since the audit passed`. **Resumability
+was broken outright.**
+
+**After (E3).** The gate records, per side and per file, a SHA256 of a
+**canonical projection of the clean rows only**:
+
+1. read the file as text;
+2. keep only rows whose `condition_id` is `clean`;
+3. sort by keys — `(origin_id, step_index)` for predictions,
+   `(origin_id, condition_id)` for window results — with a stable sort;
+4. order the columns, render to CSV, hash.
+
+**What this permits:** anything outside the projection. Appended
+corrupted-condition rows are invisible to it, so a gate written before an
+interruption still authorises the resume.
+
+**What it still forbids, with zero tolerance:** the projection contains **every
+column of every clean row**, so a changed value, a changed key, a **removed**
+clean row and an **added** clean row each change the digest. One differing
+character is a different hash and a hard stop. Row *order* is not part of the
+invariant, because the projection sorts; that is the only degree of freedom
+added, and it is deliberate.
+
+**Not a loosening.** What changed is *what the invariant is about* — the audited
+clean content — not how strictly it is enforced. A gate in the old whole-file
+format is **refused**, not silently accepted, since this version cannot verify
+it; re-run the audit.
+
+#### A3.2 Provenance is established positively, never by absence
+
+**The failure.** The mock check returned "real" whenever it failed to find a
+mock marker. Reproduced: five of six broken directories were accepted as a real
+ETTh2 `formal-full` result — an empty `{}` manifest, a manifest carrying only
+`mock_model: false`, a run with no summary, a manifest naming ETTh1's
+experiment, and one naming the `clean-reference` phase.
+
+**After.** A run is `REAL` only when the manifest **and** the summary explicitly
+and consistently establish all of: `mock_model` false, the ETTh2 experiment
+identity, the `formal-full` phase, the expected entrypoint, and a real
+non-placeholder model revision. Missing, partial, malformed or contradictory
+evidence is **`INVALID_PROVENANCE`** — a distinct third verdict, a distinct
+exception, exit code 5.
+
+**`--allow-mock-analysis` does not bypass it.** That flag analyses a run whose
+mockness is *established*. Broken or ambiguous provenance is a different failure
+class, and deciding to salvage it is not a call this tool may make.
+
+#### A3.3 A broken matrix fails the process
+
+**The failure.** A forecaster raising on one cell produced
+`forecasts_failed_this_process: 1` and the process **exited 0**. The failure
+lived as a status value inside an output file, invisible to anything reading an
+exit code, and would have been absorbed into a "resume later" path.
+
+**After.** On a full `formal-full` pass the runner asserts every frozen
+completion invariant — 178 origins, 2,314 rows, 2,314 distinct cells,
+`rows_by_status == {"ok": 2314}`, max target digests per origin == 1, zero
+failures — and the CLI **exits 6** on any violation. **No cell is retried**, by
+design: a retry would hide both the failure and its cause. The summary is
+persisted before the raise, so the evidence survives. A pass deliberately
+limited with `--limit-origins` is a partial run by instruction, not a violation.
+
+#### A3.4 Corrected hard-stop numbering
+
+The runbook previously listed "**4.0**" among its hard stops. There is no §4.0.
+The initialization guard is **§3.0** and the clean-reference audit is **§5**. The
+current hard stops are steps **2, 3, 3.0, 5, 6 and 7**, plus the
+native-missingness check inside every runner invocation, and the
+quick-reference table now lists twelve.
+
+**Still not run.** No ETTh2 forecast has been produced. Real execution requires
+a separate, explicit Research Lead approval.
+
+---
+
 ## 10. Sign-off status of every item
 
 Signed off against commit `5b62949d5faff25d9dc712ee8f711b19f24fceed` on
@@ -479,4 +580,4 @@ Not design decisions — operational gates. See
 | Formal run's clean-only pass, second independent process | **NOT RUN** |
 | Exact clean-reference audit — the hard stop before any corrupted forecast | **NOT RUN** |
 | The remaining corrupted-condition forecasts | **NOT RUN** |
-| **Research Lead approval for real execution** | **REQUIRED, and separate from this sign-off.** Implementation sign-off is not execution approval. E1 was declined; E2 is the current candidate. |
+| **Research Lead approval for real execution** | **REQUIRED, and separate from this sign-off.** Implementation sign-off is not execution approval. E1 was declined and E2 ruled NO-GO; E3 is the current candidate. |
