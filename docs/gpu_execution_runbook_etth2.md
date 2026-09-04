@@ -17,20 +17,20 @@ the identity fields as much as to the predictions.
 > initialization guard is **§3.0**. The list above is the current, correct one
 > and matches the quick-reference table at the end.
 
-**Execution commit (E3): `75fe27445e5c6c7fd28b3b9cca28a5d000a2fe4c`** — the current ETTh2
+**Execution commit (E4): `e67a5858b370d844bfcc90328c50cb0d08b6c5ac`** — the current ETTh2
 implementation freeze. This is what step 1 checks out and what every run
 manifest must record as executed.
 
-**E3 supersedes E2 (`c10beaf0ab7c10019c15415f5e85a65ab2cf0007`), which is
-NO-GO, and E1 (`881f1c5e04980309aafd5929ece06cbd62ea1ff0`) before it.** E3 fixes
-three interaction bugs found in E2 and recorded in preregistration amendment A3:
-a clean-reference gate that could not survive a resume, provenance that accepted
-a run as real by the mere absence of mock markers, and a `formal-full` pass that
-exited 0 with a failed cell in the matrix. Do **not** execute E1 or E2.
+**E4 supersedes E3 (`75fe27445e5c6c7fd28b3b9cca28a5d000a2fe4c`), which remains
+NO-GO, and E2 and E1 before it.** E4 fixes one narrow but serious defect
+recorded in preregistration amendment A4: `REAL` provenance checked only that a
+model revision looked non-placeholder, not that it was the pinned one, so a run
+produced against unknown weights read as a real ETTh2 result. Do **not** execute
+E1, E2 or E3.
 
-This runbook ships in a later documentation commit (D7), which names E3 above.
-**D7 is never the executed commit** — no documentation commit ever is.
-If `git rev-parse HEAD` during a run does not equal E3, stop: the manifests
+This runbook ships in a later documentation commit (D8), which names E4 above.
+**D8 is never the executed commit** — no documentation commit ever is.
+If `git rev-parse HEAD` during a run does not equal E4, stop: the manifests
 would otherwise attribute results to the wrong tree.
 
 ---
@@ -60,7 +60,7 @@ Python session.
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/etth2-replication-v1
-git checkout 75fe27445e5c6c7fd28b3b9cca28a5d000a2fe4c    # E3, the current implementation freeze
+git checkout e67a5858b370d844bfcc90328c50cb0d08b6c5ac    # E4, the current implementation freeze
 git status --porcelain            # must print nothing
 git rev-parse HEAD                # must equal the execution commit; record it
 
@@ -401,10 +401,11 @@ consistently carry `mock_model`, the ETTh2 experiment identity, the
 `formal-full` phase, the expected entrypoint, and a real model revision.
 
 * **`INVALID_PROVENANCE` → exit 5.** Missing, partial, malformed or
-  contradictory provenance. **`--allow-mock-analysis` does NOT bypass this** —
-  that flag analyses a run whose mockness is *established*; broken provenance is
-  a different failure class, and salvaging it is not a decision this tool may
-  make. Re-run the phase or report the directory.
+  contradictory provenance — **including a `model_contract.revision` that is
+  not exactly the pinned one.** **`--allow-mock-analysis` does NOT bypass
+  this** — that flag analyses a run whose mockness is *established*; broken
+  provenance is a different failure class, and salvaging it is not a decision
+  this tool may make. Re-run the phase or report the directory.
 * **Mock run → exit 3**, unless `--allow-mock-analysis` is passed.
 * A real run needs no flag. If you ever pass `--allow-mock-analysis` for a pipeline exercise, every
 artifact it writes is stamped `mock_model: true`,
@@ -414,6 +415,23 @@ label is prefixed `MOCK_NOT_A_FINDING__` — such output must never be reported.
 Outputs are written to `analysis.staging`, verified, then promoted with an
 atomic rename. A failure leaves **no** official `analysis/` directory rather
 than a half-correct one, and exits 4.
+
+#### 7.1 The revision pin
+
+`REAL` provenance requires `model_contract.revision` to **equal** the pinned
+value `29ec3766d36d6f73f0696f85560a422f50e8498c`, read from
+`configs/pilot_config.yaml` at call time — the single source of truth for it.
+
+The comparison is **exact**: not stripped, not case-folded, not prefix-matched.
+A trailing space, an uppercased hash, a one-character difference and a plausible
+but different 40-character SHA are each a different checkpoint claim, and each
+is `INVALID_PROVENANCE`. This is the same zero-tolerance discipline §5 applies
+to the audit's identity fields.
+
+If step 3's real-checkpoint verification passed, this will pass too — the run
+loaded the pinned revision and recorded it. A failure here means the manifest
+does not say what you think it says: **stop and report it**, do not edit the
+manifest.
 
 The outcome is exactly one of **REPLICATED** / **CONTRADICTED** /
 **INCONCLUSIVE**, decided from `R_16`, `R_32`, `R_64` only. `R_128` is measured
@@ -458,7 +476,7 @@ Raw per-forecast files may stay uncommitted. Summaries may not.
 | 8 | 6 | the audited **clean rows** changed since the audit passed (§5.1) | stop; the gate no longer describes the clean data. Appended corrupted rows are NOT this |
 | 9 | 6 | gate predates the clean-content projection | stop; re-run step 5 to write a verifiable gate |
 | 10 | 6 | any completion invariant violated, incl. one failed cell | stop; **exit 6**. No cell is retried — read the recorded error |
-| 11 | 7 | `INVALID_PROVENANCE` | stop; **exit 5**. Not bypassable with `--allow-mock-analysis` |
+| 11 | 7 | `INVALID_PROVENANCE`, incl. a revision that is not exactly the pinned one (§7.1) | stop; **exit 5**. Not bypassable with `--allow-mock-analysis` |
 | 12 | 7 | staged reporting fails verification | stop; nothing was promoted, and exit 4 says so |
 
 **No step below a hard stop may be run until that stop is cleared by the

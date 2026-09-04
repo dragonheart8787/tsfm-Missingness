@@ -548,6 +548,80 @@ a separate, explicit Research Lead approval.
 
 ---
 
+### A4 — REAL provenance requires the exact pinned revision (2026-09-04)
+
+Recorded after the Research Lead independently confirmed a defect in E3
+(`75fe27445e5c6c7fd28b3b9cca28a5d000a2fe4c`), which **remains NO-GO**.
+**E4 (`e67a5858b370d844bfcc90328c50cb0d08b6c5ac`) is the current execution
+commit; E1, E2 and E3 must not be executed.**
+
+**This amendment changes no design decision.** Gap lengths, SESOI, bootstrap
+settings, the primary hypothesis, the classification thresholds and every model
+setting are untouched. Nothing numerical or execution-related changed. The fix
+is confined to how a completed run's provenance is judged.
+
+#### The defect
+
+`assess_provenance` asked only whether `model_contract.revision` was long enough
+and did not begin with a known placeholder prefix. **"Not obviously fake" is not
+"the pinned checkpoint."** Reproduced against E3 — every one of these returned
+`REAL`:
+
+| Recorded revision | E3 verdict |
+|---|---|
+| `deadbeef` | **REAL** |
+| `0000…0000` (40 chars) | **REAL** |
+| `ffff…ffff` (40 chars) | **REAL** |
+| pinned value + one leading character | **REAL** |
+| pinned value, last character changed | **REAL** |
+| pinned value + a trailing space | **REAL** |
+| pinned value, uppercased | **REAL** |
+
+A run produced against **unknown weights** would therefore have been analysed,
+reported and compared against ETTh1 as a real ETTh2 result. For a replication
+whose entire claim rests on running the *same* model on a *different* dataset,
+that is not a cosmetic failure — the pinned checkpoint is half the comparison.
+
+#### The fix
+
+`REAL` now requires `model_contract.revision` to **EQUAL** the pinned value
+`29ec3766d36d6f73f0696f85560a422f50e8498c`.
+
+* **Exact comparison.** Not stripped, not case-folded, not prefix- or
+  substring-matched. A trailing space and an uppercased hash are different
+  strings, and a run whose manifest recorded one did not record the pinned
+  checkpoint. This is the same zero-tolerance discipline §8's clean audit
+  applies to its identity fields, and it is deliberate: normalising here would
+  be choosing a tolerance after seeing a discrepancy.
+* **One source of truth.** The expected value is passed in, read from
+  `pilot_config["model"]["revision"]` at call time. It is **not** duplicated in
+  `experiments/analyze_etth2.py`; a test asserts the string does not appear in
+  that file at all, so the pin cannot drift from the config it is pinned in.
+* **No default pass.** A caller that omits the expected revision cannot obtain
+  `REAL` — the omission is itself recorded as a reason and the verdict is
+  `INVALID_PROVENANCE`.
+* **Not bypassable.** A wrong revision is `INVALID_PROVENANCE`, exit code 5, and
+  `--allow-mock-analysis` does not reach it, exactly as A3.2 established for the
+  other invalid-provenance cases.
+
+The placeholder helper was inverted and renamed to state what it is for. It now
+recognises a **mock** run's revision only, and can no longer be mistaken for
+evidence that a revision is the *right* one — which is how the defect arose.
+
+#### Coverage
+
+The reproduction case; three well-formed but wrong 40-character SHAs, so this
+cannot be a length or format check; seven near misses including prefix and
+suffix truncation and single-character changes at either end; seven whitespace
+and case variants; the exact pinned revision as a positive control; a declared
+mock left unaffected; a caller omitting the pin; a caller whose config moves the
+pin; and both settings of `--allow-mock-analysis`.
+
+**Still not run.** No ETTh2 forecast has been produced. Real execution requires
+a separate, explicit Research Lead approval.
+
+---
+
 ## 10. Sign-off status of every item
 
 Signed off against commit `5b62949d5faff25d9dc712ee8f711b19f24fceed` on
@@ -580,4 +654,4 @@ Not design decisions — operational gates. See
 | Formal run's clean-only pass, second independent process | **NOT RUN** |
 | Exact clean-reference audit — the hard stop before any corrupted forecast | **NOT RUN** |
 | The remaining corrupted-condition forecasts | **NOT RUN** |
-| **Research Lead approval for real execution** | **REQUIRED, and separate from this sign-off.** Implementation sign-off is not execution approval. E1 was declined and E2 ruled NO-GO; E3 is the current candidate. |
+| **Research Lead approval for real execution** | **REQUIRED, and separate from this sign-off.** Implementation sign-off is not execution approval. E1 was declined, E2 and E3 ruled NO-GO; E4 is the current candidate. |
