@@ -12,13 +12,20 @@ not select a tolerance after seeing a discrepancy** — a mismatch is a stop, no
 a tuning problem, and that applies to the identity fields as much as to the
 predictions.
 
-**Execution commit (E1): `881f1c5e04980309aafd5929ece06cbd62ea1ff0`** — the ETTh2 implementation freeze.
-This is what step 1 checks out and what every run manifest must record as
-executed.
+**Execution commit (E2): `c10beaf0ab7c10019c15415f5e85a65ab2cf0007`** — the current ETTh2
+implementation freeze. This is what step 1 checks out and what every run
+manifest must record as executed.
 
-This runbook ships in a later documentation commit (D5), which names E1 above.
-**D5 is never the executed commit** — no documentation commit ever is.
-If `git rev-parse HEAD` during a run does not equal it, stop: the manifests
+**E2 supersedes E1 (`881f1c5e04980309aafd5929ece06cbd62ea1ff0`) for execution.**
+E1 was never approved to run; E2 adds the hardening in preregistration amendment
+A2 — the shared-runner hard stop, correct manifest provenance, family-correct
+reporting built in, structurally unmistakable mock artifacts, a
+staleness-resistant clean-reference gate, truthful fetch exit codes, and
+exit-status propagation in the pipelines below. Do **not** execute E1.
+
+This runbook ships in a later documentation commit (D6), which names E2 above.
+**D6 is never the executed commit** — no documentation commit ever is.
+If `git rev-parse HEAD` during a run does not equal E2, stop: the manifests
 would otherwise attribute results to the wrong tree.
 
 ---
@@ -48,7 +55,7 @@ Python session.
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/etth2-replication-v1
-git checkout 881f1c5e04980309aafd5929ece06cbd62ea1ff0    # E1, the implementation-freeze commit
+git checkout c10beaf0ab7c10019c15415f5e85a65ab2cf0007    # E2, the current implementation freeze
 git status --porcelain            # must print nothing
 git rev-parse HEAD                # must equal the execution commit; record it
 
@@ -343,6 +350,16 @@ Writes into `results/etth2_replication_v1/formal/analysis/`:
 * `etth2_analysis.json` — the full payload
 * the dose-response and paired-difference outputs, as on ETTh1
 
+`analyze_etth2.py` **refuses a mock run**, exiting 3. On a real run it needs no
+flag. If you ever pass `--allow-mock-analysis` for a pipeline exercise, every
+artifact it writes is stamped `mock_model: true`,
+`scientifically_valid: false`, `authoritative_result: false`, and its outcome
+label is prefixed `MOCK_NOT_A_FINDING__` — such output must never be reported.
+
+Outputs are written to `analysis.staging`, verified, then promoted with an
+atomic rename. A failure leaves **no** official `analysis/` directory rather
+than a half-correct one, and exits 4.
+
 The outcome is exactly one of **REPLICATED** / **CONTRADICTED** /
 **INCONCLUSIVE**, decided from `R_16`, `R_32`, `R_64` only. `R_128` is measured
 and reported but excluded; `B_g` is reported alongside and never decisive.
@@ -383,7 +400,9 @@ Raw per-forecast files may stay uncommitted. Summaries may not.
 | 5 | 3.0 | either run directory already exists | stop; do not delete, overwrite or reuse |
 | 6 | 5 | **any** clean-audit field differs | stop; do not select a tolerance, for any field |
 | 7 | 6 | gate file absent, failed, or mismatched | stop; the audit does not authorise this run |
-| 8 | 6 | row / cell / origin counts ≠ 2314 / 2314 / 178 | stop; the matrix is incomplete or duplicated |
+| 8 | 6 | clean artifacts changed since the audit passed | stop; the gate no longer describes the data on disk |
+| 9 | 6 | row / cell / origin counts ≠ 2314 / 2314 / 178 | stop; the matrix is incomplete or duplicated |
+| 10 | 7 | staged reporting fails verification | stop; nothing was promoted, and exit 4 says so |
 
 **No step below a hard stop may be run until that stop is cleared by the
 Research Lead. Clearing means a decision, not a retry.**

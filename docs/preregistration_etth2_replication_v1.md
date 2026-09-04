@@ -408,6 +408,45 @@ implementation environment — its network policy denies `huggingface.co` — an
 
 ---
 
+### A2 — Pre-execution hardening (2026-09-04)
+
+Recorded after the Research Lead declined to approve E1
+(`881f1c5e04980309aafd5929ece06cbd62ea1ff0`) for execution and required
+defence-in-depth first. **E2 (`c10beaf0ab7c10019c15415f5e85a65ab2cf0007`) is the
+current execution commit; E1 must not be executed.**
+
+**This amendment changes no design decision.** The gap lengths, SESOI, bootstrap
+settings, primary intersection hypothesis and classification thresholds are
+untouched. What changed is the machinery that enforces §2.1's hard stop, §8's
+clean control and §8.1's delivery obligations, plus the correctness of what the
+pipeline writes down.
+
+| # | Hardening | Why it was needed |
+|---|---|---|
+| 1 | The native-missingness hard stop moved into the **shared runner**, after `load_series` and before any window or forecast. Opt-in via `dataset.native_missing_is_a_hard_stop`. | E1's gate lived only in the ETTh2 wrapper. Importing the shared runner and calling it directly walked around it — the hole the E1 report flagged. |
+| 2 | ETTh2 manifests carry their **own** experiment identity, preregistration path, rule version, sign-off commit, entrypoint, phase, mock flag, and the real git commit and dirty status. The enriched summary is persisted atomically. | E1's manifests inherited ETTh1's experiment name from `trailing_gap_config.meta`, misattributing the run in the one file a reviewer uses to establish what executed. |
+| 3 | **Family-correct `B_g` reporting built in**, with an explicit `comparison_arm` on every row, verified against a pre-correction numeric snapshot, staged and promoted atomically. No ETTh2 artifact carries the ETTh1 erratum id. | ETTh1 needed erratum `ERRATUM-2026-09-04-bg-comparison-arm` after the fact. ETTh2 must not repeat it, and must not claim to have been corrected for a defect it never had. |
+| 4 | Mock runs are **refused by default**; under the explicit escape hatch every artifact carries `mock_model: true`, `scientifically_valid: false`, `authoritative_result: false`, a plain-language note, and a `MOCK_NOT_A_FINDING__` label prefix. | A mock classification was structurally indistinguishable from a real one. This is a constraint on the data shape, not on prose around it. |
+| 5 | Clean-reference gate: distinct directories enforced, provenance columns required, both sides anchored to the checksum and revision loaded **now**, clean-only verified before the audit, and the gate bound to the **bytes** of the clean artifacts with a re-check at `formal-full` startup. | Two runs can agree with each other and both be stale, and a gate valid when written said nothing about files edited afterwards. |
+| 6 | `data/fetch_etth2.py` returns a **truthful exit code** on every contract violation, tested through the real CLI as a subprocess. | A script that printed "VALIDATION NOTES" and exited 0 would let a runbook's `$?` check conclude the dataset was fine. |
+| 7 | Every runbook pipeline preserves the Python command's status via `PIPESTATUS[0]`, verified by a behavioural test that runs each block against a deliberately failing command. | `cmd \| tee log` makes `$?` tee's status, which is 0 even when `cmd` failed — the same class of bug fixed in the trailing-gap runbook's §3.0 guard. |
+
+**ETTh1 is unaffected.** The shared-runner change is additive and opt-in;
+ETTh1's config does not set the policy key. The full 178-origin ETTh1 mock
+matrix was hashed before and after: every column except `run_id` (a UTC
+timestamp) and `runtime_seconds` (wall clock) is identical, and all seven
+derived analysis files are byte-identical. Those two columns differ between any
+two runs of unchanged code. The hashes are pinned in
+`tests/test_native_missingness_policy.py`, so a future change that moves ETTh1's
+behaviour fails the suite. **No already-produced ETTh1 result is altered by
+this amendment** — the frozen classification
+`INCONCLUSIVE / mixed_equivalent_and_unresolved` stands.
+
+**Still not run.** No ETTh2 forecast has been produced. Real execution requires
+a separate, explicit Research Lead approval.
+
+---
+
 ## 10. Sign-off status of every item
 
 Signed off against commit `5b62949d5faff25d9dc712ee8f711b19f24fceed` on
@@ -440,4 +479,4 @@ Not design decisions — operational gates. See
 | Formal run's clean-only pass, second independent process | **NOT RUN** |
 | Exact clean-reference audit — the hard stop before any corrupted forecast | **NOT RUN** |
 | The remaining corrupted-condition forecasts | **NOT RUN** |
-| **Research Lead approval for real execution** | **REQUIRED, and separate from this sign-off.** Implementation sign-off is not execution approval. |
+| **Research Lead approval for real execution** | **REQUIRED, and separate from this sign-off.** Implementation sign-off is not execution approval. E1 was declined; E2 is the current candidate. |
