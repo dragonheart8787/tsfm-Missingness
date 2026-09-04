@@ -44,10 +44,14 @@ def main() -> int:
     print(f"  files compared          : {', '.join(report.files_compared)}")
     print(f"  values compared         : {report.values_compared}")
     print(f"  numeric fields compared : {report.numeric_fields_compared}")
-    print(f"  allowed differences     : {len(report.allowed_differences)} "
-          f"(B_g interpretation only)")
-    for where in report.allowed_differences:
+    print(f"  pass-through files      : {len(report.passthrough_files_compared)} "
+          f"(byte-identical)")
+    print(f"  interpretation changes  : {len(report.interpretation_changes)} "
+          f"(B_g only — this IS the erratum)")
+    for where in report.interpretation_changes:
         print(f"      {where}")
+    print(f"  whitelisted additions   : {len(report.whitelisted_additions)} "
+          f"(new fields; nothing pre-existing altered)")
     (out_dir / "identity_check.json").write_text(
         json.dumps(report.as_dict(), indent=2), encoding="utf-8"
     )

@@ -93,6 +93,10 @@ INTERPRETATION_B: dict[str, str] = {
 # carry across byte-for-byte.
 DESCRIPTION_COLUMNS = ("interpretation",)
 ADDED_COLUMNS = ("comparison_arm", "reporting_version", "erratum_id")
+# Keys the v2 payload may add at the JSON root. Nothing else, anywhere.
+ADDED_ROOT_KEYS = ("reporting_version", "erratum_id", "erratum_note")
+# Keys the v2 payload may add inside a contrast row.
+ADDED_ROW_KEYS = ("comparison_arm",)
 
 
 class ReportingV2Error(RuntimeError):
@@ -107,7 +111,12 @@ class IdentityReport:
     files_compared: list[str] = field(default_factory=list)
     values_compared: int = 0
     numeric_fields_compared: int = 0
-    allowed_differences: list[str] = field(default_factory=list)
+    # A REWRITTEN value: B's interpretation text. This is the erratum itself.
+    interpretation_changes: list[str] = field(default_factory=list)
+    # An ADDED field on the whitelist. A different category from a rewrite:
+    # nothing that existed before was altered.
+    whitelisted_additions: list[str] = field(default_factory=list)
+    passthrough_files_compared: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -116,8 +125,11 @@ class IdentityReport:
             "files_compared": self.files_compared,
             "values_compared": self.values_compared,
             "numeric_fields_compared": self.numeric_fields_compared,
-            "n_allowed_differences": len(self.allowed_differences),
-            "allowed_differences": self.allowed_differences,
+            "passthrough_files_compared": self.passthrough_files_compared,
+            "n_interpretation_changes": len(self.interpretation_changes),
+            "interpretation_changes": self.interpretation_changes,
+            "n_whitelisted_additions": len(self.whitelisted_additions),
+            "whitelisted_additions": self.whitelisted_additions,
             "violations": self.violations,
         }
 
@@ -157,6 +169,15 @@ def build_reporting_v2(analysis_dir: Path, out_dir: Path | None = None) -> Path:
     out_dir = Path(out_dir) if out_dir else analysis_dir.parent / REPORTING_VERSION
     if not analysis_dir.is_dir():
         raise ReportingV2Error(f"{analysis_dir} is not a directory")
+    # Same discipline as the runbook's initialization guard: never write into a
+    # directory that could retain stale files from an earlier run, which would
+    # silently mix two v2 builds and defeat the pass-through byte check.
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise ReportingV2Error(
+            f"{out_dir} already exists and is not empty. Refusing to write into it: "
+            f"stale files from a previous build would survive and be compared as if "
+            f"they were this build's. Remove it deliberately, or choose another path."
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for name, family in (("R_contrasts.csv", "R"), ("B_contrasts.csv", "B")):
@@ -207,6 +228,13 @@ def _is_numeric(value: str) -> bool:
 
 
 def _compare_csv(v1: Path, v2: Path, *, family: str, report: IdentityReport) -> None:
+    """Original values must carry across; added values must be exactly right.
+
+    Validating only that the originals are unchanged is necessary but not
+    sufficient: a v2 could preserve every number and still assert the wrong
+    comparison arm, the wrong interpretation, or an unexpected extra column.
+    All of that is checked here.
+    """
     a = pd.read_csv(v1, dtype=str, keep_default_na=False)
     b = pd.read_csv(v2, dtype=str, keep_default_na=False)
     report.files_compared.append(v1.name)
@@ -220,8 +248,11 @@ def _compare_csv(v1: Path, v2: Path, *, family: str, report: IdentityReport) -> 
         return
     unexpected = [c for c in b.columns if c not in a.columns and c not in ADDED_COLUMNS]
     if unexpected:
-        report.violations.append(f"{v1.name}: v2 added unexpected column(s) {unexpected}")
+        report.violations.append(
+            f"{v1.name}: v2 added column(s) not on the whitelist: {unexpected}"
+        )
 
+    # --- original values ---------------------------------------------------- #
     for column in a.columns:
         for i, (x, y) in enumerate(zip(a[column], b[column])):
             report.values_compared += 1
@@ -231,9 +262,42 @@ def _compare_csv(v1: Path, v2: Path, *, family: str, report: IdentityReport) -> 
                 continue
             where = f"{v1.name}[row {i}, {a.iloc[i].get('contrast_id', '?')}].{column}"
             if column in DESCRIPTION_COLUMNS and family == "B":
-                report.allowed_differences.append(where)
+                report.interpretation_changes.append(where)
             else:
                 report.violations.append(f"{where}: {x!r} -> {y!r}")
+
+    # --- the transformation itself ------------------------------------------ #
+    for i in range(len(b)):
+        row = b.iloc[i]
+        cid = row.get("contrast_id", f"row {i}")
+
+        if family == "B":
+            expected = INTERPRETATION_B.get(row["reading"])
+            if expected is None:
+                report.violations.append(f"{v1.name}[{cid}]: unknown reading {row['reading']!r}")
+            elif row["interpretation"] != expected:
+                report.violations.append(
+                    f"{v1.name}[{cid}].interpretation is not INTERPRETATION_B"
+                    f"[{row['reading']}]"
+                )
+        else:
+            # R's text must be carried across untouched, not rewritten.
+            if row["interpretation"] != a.iloc[i]["interpretation"]:
+                report.violations.append(
+                    f"{v1.name}[{cid}].interpretation: R's text must not be rewritten"
+                )
+
+        for column, expected in (
+            ("comparison_arm", COMPARISON_ARM[family]),
+            ("reporting_version", REPORTING_VERSION),
+            ("erratum_id", ERRATUM_ID),
+        ):
+            if column not in b.columns:
+                report.violations.append(f"{v1.name}[{cid}]: missing {column}")
+            elif row[column] != expected:
+                report.violations.append(
+                    f"{v1.name}[{cid}].{column}: {row[column]!r} != {expected!r}"
+                )
 
 
 def _compare_json(v1: Path, v2: Path, report: IdentityReport) -> None:
@@ -252,6 +316,17 @@ def _compare_json(v1: Path, v2: Path, report: IdentityReport) -> None:
                     continue
                 walk(x[key], y[key], f"{path}.{key}",
                      in_b_contrast=in_b_contrast or path.endswith("b_contrasts"))
+            # Any key v2 invented inside a nested object is a violation unless
+            # it is a whitelisted per-row addition.
+            for key in y:
+                if key in x:
+                    continue
+                if key in ADDED_ROW_KEYS:
+                    report.whitelisted_additions.append(f"{path}.{key}")
+                else:
+                    report.violations.append(
+                        f"{path}.{key}: key not on the whitelist appeared in v2"
+                    )
             return
         if isinstance(x, list):
             if not isinstance(y, list) or len(x) != len(y):
@@ -267,7 +342,7 @@ def _compare_json(v1: Path, v2: Path, report: IdentityReport) -> None:
             return
         leaf = path.rsplit(".", 1)[-1]
         if in_b_contrast and leaf in DESCRIPTION_COLUMNS:
-            report.allowed_differences.append(path)
+            report.interpretation_changes.append(path)
         else:
             report.violations.append(f"{path}: {x!r} -> {y!r}")
 
@@ -277,14 +352,69 @@ def _compare_json(v1: Path, v2: Path, report: IdentityReport) -> None:
             continue
         walk(a[key], b[key], key, in_b_contrast=key == "b_contrasts")
 
+    # Root-level additions must be exactly the documented ones, with the
+    # documented values.
+    for key in b:
+        if key in a:
+            continue
+        if key not in ADDED_ROOT_KEYS:
+            report.violations.append(
+                f"{v1.name}: root key {key!r} is not on the whitelist"
+            )
+            continue
+        expected = {"reporting_version": REPORTING_VERSION, "erratum_id": ERRATUM_ID}.get(key)
+        if expected is not None and b[key] != expected:
+            report.violations.append(f"{v1.name}.{key}: {b[key]!r} != {expected!r}")
+
+    # Every B contrast row must carry the corrected text and the correct arm.
+    for i, row in enumerate(b.get("b_contrasts", [])):
+        expected = INTERPRETATION_B.get(row.get("reading"))
+        if expected is None:
+            report.violations.append(f"b_contrasts[{i}]: unknown reading")
+        elif row.get("interpretation") != expected:
+            report.violations.append(
+                f"b_contrasts[{i}].interpretation is not INTERPRETATION_B[{row.get('reading')}]"
+            )
+        if row.get("comparison_arm") != COMPARISON_ARM["B"]:
+            report.violations.append(f"b_contrasts[{i}].comparison_arm is wrong")
+    for i, row in enumerate(b.get("r_contrasts", [])):
+        if row.get("comparison_arm") != COMPARISON_ARM["R"]:
+            report.violations.append(f"r_contrasts[{i}].comparison_arm is wrong")
+
+
+def _compare_passthrough(analysis_dir: Path, v2_dir: Path, report: IdentityReport) -> None:
+    """Files not rewritten by the erratum must be byte-identical, and complete."""
+    rewritten = {
+        "R_contrasts.csv", "B_contrasts.csv", "trailing_gap_analysis.json",
+        "identity_check.json",
+    }
+    source = {p.name for p in analysis_dir.iterdir() if p.is_file()}
+    produced = {p.name for p in v2_dir.iterdir() if p.is_file()}
+
+    for name in sorted(source - produced):
+        report.violations.append(f"pass-through file missing from v2: {name}")
+    for name in sorted(produced - source - rewritten):
+        report.violations.append(f"unexpected file in v2: {name}")
+
+    for name in sorted(source & produced - rewritten):
+        a, b = (analysis_dir / name).read_bytes(), (v2_dir / name).read_bytes()
+        report.passthrough_files_compared.append(name)
+        if a != b:
+            report.violations.append(
+                f"pass-through file modified (byte-identity required): {name}"
+            )
+
 
 def compare_reporting_versions(analysis_dir: Path, v2_dir: Path) -> IdentityReport:
-    """Prove the erratum changed nothing but the B_g description.
+    """Prove the erratum performed EXACTLY the permitted transformation.
 
-    Compares every value in the contrast tables and the analysis payload —
-    every metric, CI bound, p-value, per-gap reading, the SESOI, the
-    dose-response result and the final classification. Any difference outside
-    B's ``interpretation`` is a violation.
+    Validates three things, not one:
+      1. every original value is unchanged (except B's interpretation);
+      2. every added value is exactly right — B's text equals
+         INTERPRETATION_B[reading], both families' comparison_arm is correct,
+         and the version/erratum markers match;
+      3. nothing else appeared — no unwhitelisted column, JSON key, or file,
+         and every pass-through file is byte-identical.
     """
     analysis_dir, v2_dir = Path(analysis_dir), Path(v2_dir)
     report = IdentityReport()
@@ -300,6 +430,9 @@ def compare_reporting_versions(analysis_dir: Path, v2_dir: Path) -> IdentityRepo
         v1, v2 = analysis_dir / name, v2_dir / name
         if v1.exists() and v2.exists():
             _compare_json(v1, v2, report)
+
+    if analysis_dir.is_dir() and v2_dir.is_dir():
+        _compare_passthrough(analysis_dir, v2_dir, report)
 
     report.identical = not report.violations
     return report

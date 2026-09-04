@@ -80,34 +80,102 @@ A new, additive reporting layer, `experiments/reporting_v2.py`, emits
 unchanged by construction, not merely by inspection. The original `analysis/`
 directory is never written to.
 
-Three of four B rows change on the frozen ETTh1 result: `B_16`, `B_32`, `B_64`
-read `EQUIVALENT`, whose text was arm-specific. `B_128` reads `UNRESOLVED`,
-whose text names no arm and is byte-identical in both families — so it correctly
-does not change.
+**All four B rows change on the real ETTh1 result.** `B_16`, `B_32`, `B_64` and
+`B_128` all read `MATERIAL_POSITIVE`, whose text is arm-specific — so **8
+interpretation cells** are rewritten: four in `B_contrasts.csv` and four again
+in `trailing_gap_analysis.json`.
+
+> **Correction to this erratum's first draft.** It stated "6, not 8", claiming
+> `B_128` read `UNRESOLVED` and so did not change. That was wrong. It was a
+> property of a *synthetic test fixture* whose B rows had been given R's reading
+> distribution — which contains an `UNRESOLVED` at `g=128` — and it was
+> incorrectly generalised as if it described the real data. On the real ETTh1
+> output every B reading is `MATERIAL_POSITIVE`. The count is **8**.
+>
+> The test suite now keeps `R_READINGS` and `B_READINGS` as separate fixtures,
+> and the row builder looks a family's distribution up by family rather than
+> accepting one as a parameter, so R's distribution can no longer stand in for
+> B's. That substitution was the entire cause of the error.
 
 ## 4. How "no number changed" is proved
 
-`compare_reporting_versions()` walks every value in both directories — the
-contrast tables, the analysis payload, `classification.json` and
-`dose_response.json` — and reports any difference outside B's `interpretation`
-as a violation. CSV cells are read with `dtype=str`, so non-description cells
-are compared byte-for-byte and cannot be perturbed by a float round-trip.
+`compare_reporting_versions()` validates the **complete permitted
+transformation**, not merely that the originals survived. Preservation alone is
+necessary but not sufficient: a v2 could keep every number and still assert the
+wrong comparison arm, carry the wrong interpretation, plant a rogue field, or
+quietly edit a copied-through file. All three of those classes previously
+slipped through. The check now rejects:
+
+| Rejected | Why it matters |
+|---|---|
+| B interpretation ≠ `INTERPRETATION_B[reading]` | Right dictionary, wrong key is still wrong |
+| A rewritten **R** interpretation | Only B may change |
+| A wrong `comparison_arm`, either family | Every number preserved, arm still misstated |
+| A wrong `reporting_version` / `erratum_id` | Provenance markers must be exact |
+| Any CSV column not on the whitelist | Editorial commentary cannot be smuggled in |
+| Any JSON key not on the whitelist, at root or in a row | A planted numeric field has nothing to compare against |
+| A missing, extra, or modified pass-through file | Byte-identity required on anything meant to pass through |
+| A pre-existing, non-empty output directory | Stale files from an earlier build would survive |
+
+The whitelist is exactly: the contrast-row `comparison_arm`,
+`reporting_version` and `erratum_id` columns, and the root `reporting_version`,
+`erratum_id` and `erratum_note` keys. CSV cells are read with `dtype=str`, so
+non-description cells are compared byte-for-byte and cannot be perturbed by a
+float round-trip.
+
+Two categories are reported separately, because they are not the same thing: an
+**interpretation change** rewrites a pre-existing value (this is the erratum),
+whereas a **whitelisted addition** adds a new field and alters nothing.
 
 ```bash
 python scripts/build_reporting_v2.py \
   --analysis-dir results/trailing_gap_v1/analysis
 ```
 
-Exits non-zero if anything numeric moved, and writes `identity_check.json`
-recording what it compared.
+Exits non-zero if anything moved outside the whitelist, and writes
+`identity_check.json` recording what it compared.
 
-`tests/test_reporting_v2.py` (28 tests) covers this, including adversarial
-cases that perturb — one at a time — the raw difference, both Holm CI bounds,
-the Holm-adjusted p-value, both 90% CI bounds, the SESOI, the fraction of
-positive origins, the median paired difference, a block-length estimate, a
-per-gap reading, the dose-response slope, the classification label, and R's
-interpretation, plus a dropped row and a dropped column. **Each must fail the
-identity check**, so a passing check is evidence rather than decoration.
+**Expected output on the real ETTh1 analysis:**
+
+```
+values compared         : 536
+numeric fields compared : 363
+pass-through files      : 4   (byte-identical)
+interpretation changes  : 8   (B_16, B_32, B_64, B_128 — in the CSV and the payload)
+whitelisted additions   : 8   (comparison_arm on all 8 contrast rows)
+classification          : INCONCLUSIVE / mixed_equivalent_and_unresolved (unchanged)
+```
+
+### 4.1 Provenance of those figures — read before citing them
+
+`results/trailing_gap_v1/` is uncommitted and **was not present in the
+environment this erratum was authored in**. The block above was therefore
+produced against a **structural replica**, not against the real ETTh1 artifact:
+`experiments/run_trailing_gap.py --mock-model` (178 origins, 2,314 cells) followed
+by the real `analyse()`, with the real frozen reading distribution — `R`:
+`EQUIVALENT`, `EQUIVALENT`, `EQUIVALENT`, `UNRESOLVED`; `B`: `MATERIAL_POSITIVE`
+×4 — and the frozen classification forced onto the result. The field structure
+and the readings are real; the numeric values are mock.
+
+The counts are structural, not numeric — they depend on the schema and the
+readings, both of which the replica reproduces exactly — so the match is strong
+evidence. It is **not** a run against the real artifact, and this document does
+not claim it is. **Re-run the command above on the host holding
+`results/trailing_gap_v1/analysis/` and confirm 536 / 363 / 8 / 8 there.** A
+different count is a real finding about the artifact, not a number to reconcile
+against this page.
+
+`tests/test_reporting_v2.py` (44 tests) covers this. Adversarial cases perturb,
+one at a time: the raw difference, both Holm CI bounds, the Holm-adjusted
+p-value, both 90% CI bounds, the SESOI, the fraction of positive origins, the
+median paired difference, a block-length estimate, a per-gap reading, the
+dose-response slope, the classification label, R's interpretation, a wrong
+`comparison_arm` on either family, a wrong `INTERPRETATION_B` key, a wrong
+`reporting_version` or `erratum_id`, an unwhitelisted CSV column, an
+unwhitelisted root JSON key, a rogue numeric field planted at root and inside a
+row, a modified pass-through file, a missing pass-through file, an unexpected
+extra file, a dropped row, and a dropped column. **Each must fail the identity
+check**, so a passing check is evidence rather than decoration.
 
 ## 5. Scope
 

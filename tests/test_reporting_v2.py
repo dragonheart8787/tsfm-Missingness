@@ -34,15 +34,40 @@ from stats.mechanism_decision import INTERPRETATION
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GAPS = (16, 32, 64, 128)
-# The frozen ETTh1 readings. Used only as realistic fixture shape; this test
-# never asserts anything about the ETTh1 result itself.
-READINGS = {16: "EQUIVALENT", 32: "EQUIVALENT", 64: "EQUIVALENT", 128: "UNRESOLVED"}
+
+# The frozen ETTh1 readings, per family. THESE ARE DIFFERENT DISTRIBUTIONS and
+# must never be interchanged.
+#
+# A prior round asserted that reporting_v2 changes "6, not 8" interpretation
+# cells. That was wrong. It came from reusing an R-shaped reading distribution
+# — which contains an UNRESOLVED at g=128, whose text is arm-neutral and so
+# does not change — as a stand-in for B. On the real ETTh1 data ALL FOUR B
+# readings are MATERIAL_POSITIVE, every one of which is arm-specific, so the
+# real change count is 8: four in B_contrasts.csv and four in
+# trailing_gap_analysis.json.
+#
+# Separate dicts, and a fixture builder that REQUIRES the family's own
+# readings, so the substitution that caused that error cannot recur.
+R_READINGS = {16: "EQUIVALENT", 32: "EQUIVALENT", 64: "EQUIVALENT", 128: "UNRESOLVED"}
+B_READINGS = {
+    16: "MATERIAL_POSITIVE", 32: "MATERIAL_POSITIVE",
+    64: "MATERIAL_POSITIVE", 128: "MATERIAL_POSITIVE",
+}
+READINGS_BY_FAMILY = {"R": R_READINGS, "B": B_READINGS}
 
 
 def _contrast_rows(prefix: str) -> list[dict]:
+    """Rows for ONE family, using that family's own reading distribution.
+
+    The family's readings are looked up here rather than passed in, so a caller
+    cannot hand R's distribution to B.
+    """
+    if prefix not in READINGS_BY_FAMILY:
+        raise AssertionError(f"unknown family {prefix!r}")
+    readings = READINGS_BY_FAMILY[prefix]
     rows = []
     for i, g in enumerate(GAPS):
-        reading = READINGS[g]
+        reading = readings[g]
         rows.append({
             "contrast_id": f"{prefix}_{g}", "family": prefix, "gap": g,
             "reading": reading, "flags": "",
@@ -82,7 +107,7 @@ def analysis_dir(tmp_path) -> Path:
         "label": "INCONCLUSIVE", "reason": "mixed_equivalent_and_unresolved",
         "rule_version": "preregistered-v1", "authoritative": True,
         "criteria": {"sesoi_delta": 0.073725,
-                     "r_readings": {f"R_{g}": READINGS[g] for g in GAPS}},
+                     "r_readings": {f"R_{g}": R_READINGS[g] for g in GAPS}},
     }, indent=2), encoding="utf-8")
     (d / "trailing_gap_analysis.json").write_text(json.dumps({
         "mean_clean_mae": 2.4575, "sesoi_delta": 0.073725, "n_origins": 178,
@@ -177,29 +202,52 @@ def test_identity_check_passes_and_reports_what_it_compared(analysis_dir):
     assert "trailing_gap_analysis.json" in report.files_compared
     assert "classification.json" in report.files_compared
     assert "dose_response.json" in report.files_compared
-    # Exactly the B interpretation cells that were arm-specific differ: the
-    # three EQUIVALENT gaps, in the CSV and again in the payload. B_128 reads
-    # UNRESOLVED, whose text names no arm and is identical in both families, so
-    # it correctly does NOT change.
-    assert len(report.allowed_differences) == 6
-    assert all("interpretation" in w for w in report.allowed_differences)
-    assert all("R_contrasts" not in w for w in report.allowed_differences)
-    assert not any("B_128" in w for w in report.allowed_differences)
-    for gap in ("B_16", "B_32", "B_64"):
-        assert any(gap in w for w in report.allowed_differences), gap
+    # On the real ETTh1 data all four B readings are MATERIAL_POSITIVE, which is
+    # arm-specific, so all four change: four in the CSV and four again in the
+    # payload = 8. The interpretation cells are the ONLY value differences;
+    # added columns are reported separately as whitelisted additions.
+    interpretation_changes = report.interpretation_changes
+    assert len(interpretation_changes) == 8, interpretation_changes
+    # Additions are a separate category: nothing pre-existing was altered.
+    assert all("comparison_arm" in w for w in report.whitelisted_additions)
+    assert all("R_contrasts" not in w for w in interpretation_changes)
+    for gap in ("B_16", "B_32", "B_64", "B_128"):
+        assert any(gap in w for w in interpretation_changes), gap
 
 
-def test_arm_neutral_readings_are_left_untouched():
-    """UNRESOLVED and MATERIAL_NEGATIVE name no arm in R's text.
+def test_all_four_real_b_readings_are_arm_specific():
+    """Why the real change count is 8 and not 6.
 
-    UNRESOLVED is identical in both families, so a B row reading UNRESOLVED is
-    not rewritten. MATERIAL_NEGATIVE differs only because the corrected text
-    adds B's own caveat, not because R's version named the wrong arm.
+    Every reading in B_READINGS names an arm in R's text, so every B row is
+    rewritten. UNRESOLVED — which appears in R's distribution but NOT in B's —
+    is the arm-neutral one that would not have changed.
     """
+    for gap, reading in B_READINGS.items():
+        assert INTERPRETATION[reading] != INTERPRETATION_B[reading], (
+            f"B_{gap} reads {reading}, which must be rewritten"
+        )
+    assert "UNRESOLVED" not in B_READINGS.values()
+    # ...and the arm-neutral reading really is identical across families.
     assert INTERPRETATION_B["UNRESOLVED"] == INTERPRETATION["UNRESOLVED"]
     for arm_word in ("shorter-context", "truncated", "horizon-dominant"):
         assert arm_word not in INTERPRETATION["UNRESOLVED"]
-        assert arm_word not in INTERPRETATION["MATERIAL_NEGATIVE"]
+
+
+def test_r_and_b_reading_fixtures_are_structurally_separate():
+    """The root cause of the '6 not 8' error, prevented structurally."""
+    assert R_READINGS != B_READINGS
+    assert set(R_READINGS.values()) != set(B_READINGS.values())
+    assert READINGS_BY_FAMILY["R"] is R_READINGS
+    assert READINGS_BY_FAMILY["B"] is B_READINGS
+    # _contrast_rows looks the distribution up by family; it cannot be passed
+    # the wrong one.
+    import inspect
+
+    assert list(inspect.signature(_contrast_rows).parameters) == ["prefix"]
+    with pytest.raises(AssertionError, match="unknown family"):
+        _contrast_rows("X")
+    assert {r["reading"] for r in _contrast_rows("B")} == {"MATERIAL_POSITIVE"}
+    assert "UNRESOLVED" in {r["reading"] for r in _contrast_rows("R")}
 
 
 def test_every_named_field_class_is_actually_identical(analysis_dir):
@@ -330,3 +378,171 @@ def test_build_refuses_an_unknown_reading(analysis_dir):
 def test_build_refuses_a_missing_analysis_directory(tmp_path):
     with pytest.raises(ReportingV2Error):
         build_reporting_v2(tmp_path / "nope")
+
+
+# --------------------------------------------------------------------------- #
+# Hardening: the permitted TRANSFORMATION must be validated, not just the
+# preservation of the originals. The first three below previously slipped
+# through undetected — a v2 could keep every number and still assert the wrong
+# arm, plant a rogue field, or corrupt a pass-through file.
+# --------------------------------------------------------------------------- #
+
+def test_wrong_comparison_arm_is_rejected(analysis_dir):
+    """GAP 1 (previously undetected): every number preserved, arm still wrong."""
+    out = build_reporting_v2(analysis_dir)
+    frame = pd.read_csv(out / "B_contrasts.csv", dtype=str, keep_default_na=False)
+    frame["comparison_arm"] = COMPARISON_ARM["R"]      # B row claiming R's arm
+    frame.to_csv(out / "B_contrasts.csv", index=False)
+
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical, "a B row asserting R's comparison arm was accepted"
+    assert any("comparison_arm" in v for v in report.violations), report.violations
+
+
+def test_wrong_comparison_arm_on_the_r_family_is_also_rejected(analysis_dir):
+    out = build_reporting_v2(analysis_dir)
+    frame = pd.read_csv(out / "R_contrasts.csv", dtype=str, keep_default_na=False)
+    frame["comparison_arm"] = COMPARISON_ARM["B"]
+    frame.to_csv(out / "R_contrasts.csv", index=False)
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("comparison_arm" in v for v in report.violations)
+
+
+def test_rogue_extra_numeric_field_in_the_json_is_rejected(analysis_dir):
+    """GAP 2 (previously undetected): a planted field nothing compared against."""
+    out = build_reporting_v2(analysis_dir)
+    payload = json.loads((out / "trailing_gap_analysis.json").read_text(encoding="utf-8"))
+    payload["smuggled_effect_size"] = 0.4213           # root-level rogue
+    payload["b_contrasts"][0]["extra_p_value"] = 0.001  # row-level rogue
+    (out / "trailing_gap_analysis.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical, "a planted numeric field was accepted"
+    assert any("smuggled_effect_size" in v for v in report.violations), report.violations
+    assert any("extra_p_value" in v for v in report.violations), report.violations
+
+
+def test_modified_passthrough_file_is_rejected(analysis_dir):
+    """GAP 3 (previously undetected): a copied-through file quietly edited."""
+    out = build_reporting_v2(analysis_dir)
+    target = out / "per_origin_slopes.csv"
+    assert target.exists(), "fixture must include a pass-through file"
+    target.write_text("origin_id,slope\n0,999.0\n", encoding="utf-8")
+
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical, "a modified pass-through file was accepted"
+    assert any("pass-through file modified" in v for v in report.violations), report.violations
+
+
+def test_missing_passthrough_file_is_rejected(analysis_dir):
+    out = build_reporting_v2(analysis_dir)
+    (out / "per_origin_slopes.csv").unlink()
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("pass-through file missing" in v for v in report.violations)
+
+
+def test_unexpected_extra_file_is_rejected(analysis_dir):
+    out = build_reporting_v2(analysis_dir)
+    (out / "surprise.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("unexpected file in v2" in v for v in report.violations)
+
+
+def test_incorrect_b_interpretation_is_rejected(analysis_dir):
+    """The text must EQUAL INTERPRETATION_B[reading], not merely differ from R's."""
+    out = build_reporting_v2(analysis_dir)
+    frame = pd.read_csv(out / "B_contrasts.csv", dtype=str, keep_default_na=False)
+    frame.loc[0, "interpretation"] = "some other plausible-sounding sentence"
+    frame.to_csv(out / "B_contrasts.csv", index=False)
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("is not INTERPRETATION_B" in v for v in report.violations)
+
+
+def test_b_interpretation_from_the_wrong_reading_is_rejected(analysis_dir):
+    """Right dictionary, wrong key — still wrong."""
+    out = build_reporting_v2(analysis_dir)
+    frame = pd.read_csv(out / "B_contrasts.csv", dtype=str, keep_default_na=False)
+    frame.loc[0, "interpretation"] = INTERPRETATION_B["MATERIAL_NEGATIVE"]
+    frame.to_csv(out / "B_contrasts.csv", index=False)
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("is not INTERPRETATION_B" in v for v in report.violations)
+
+
+def test_rewriting_r_interpretation_is_rejected(analysis_dir):
+    """Only B may be rewritten; R's text must carry across untouched."""
+    out = build_reporting_v2(analysis_dir)
+    frame = pd.read_csv(out / "R_contrasts.csv", dtype=str, keep_default_na=False)
+    frame.loc[0, "interpretation"] = INTERPRETATION_B["MATERIAL_POSITIVE"]
+    frame.to_csv(out / "R_contrasts.csv", index=False)
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("R_contrasts.csv" in v for v in report.violations)
+
+
+def test_wrong_reporting_version_or_erratum_id_is_rejected(analysis_dir):
+    for column, bad in (("reporting_version", "v3"), ("erratum_id", "ERRATUM-OTHER")):
+        out = build_reporting_v2(analysis_dir, analysis_dir.parent / f"v2_{column}")
+        frame = pd.read_csv(out / "B_contrasts.csv", dtype=str, keep_default_na=False)
+        frame[column] = bad
+        frame.to_csv(out / "B_contrasts.csv", index=False)
+        report = compare_reporting_versions(analysis_dir, out)
+        assert not report.identical, column
+        assert any(column in v for v in report.violations), (column, report.violations)
+
+
+def test_unexpected_csv_column_is_rejected(analysis_dir):
+    out = build_reporting_v2(analysis_dir)
+    frame = pd.read_csv(out / "B_contrasts.csv", dtype=str, keep_default_na=False)
+    frame["editorial_note"] = "looks fine to me"
+    frame.to_csv(out / "B_contrasts.csv", index=False)
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("not on the whitelist" in v for v in report.violations)
+
+
+def test_unexpected_root_json_key_is_rejected(analysis_dir):
+    out = build_reporting_v2(analysis_dir)
+    payload = json.loads((out / "trailing_gap_analysis.json").read_text(encoding="utf-8"))
+    payload["editorial_summary"] = "the effect replicated"
+    (out / "trailing_gap_analysis.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("not on the whitelist" in v for v in report.violations)
+
+
+def test_whitelist_is_exactly_the_documented_set():
+    from experiments.reporting_v2 import ADDED_ROOT_KEYS, ADDED_ROW_KEYS
+
+    assert set(ADDED_COLUMNS) == {"comparison_arm", "reporting_version", "erratum_id"}
+    assert set(ADDED_ROOT_KEYS) == {"reporting_version", "erratum_id", "erratum_note"}
+    assert set(ADDED_ROW_KEYS) == {"comparison_arm"}
+
+
+def test_build_refuses_a_preexisting_nonempty_output_directory(analysis_dir):
+    """Same discipline as the runbook's initialization guard."""
+    out = build_reporting_v2(analysis_dir)
+    assert out.exists() and any(out.iterdir())
+    with pytest.raises(ReportingV2Error, match="already exists and is not empty"):
+        build_reporting_v2(analysis_dir)
+    # An empty directory is fine to write into.
+    empty = analysis_dir.parent / "empty_target"
+    empty.mkdir()
+    assert build_reporting_v2(analysis_dir, empty) == empty
+
+
+def test_passthrough_files_are_actually_compared(analysis_dir):
+    """The pass-through check must not be vacuous."""
+    out = build_reporting_v2(analysis_dir)
+    report = compare_reporting_versions(analysis_dir, out)
+    assert report.identical
+    assert "per_origin_slopes.csv" in report.passthrough_files_compared
+    assert "classification.json" in report.passthrough_files_compared
+    assert "dose_response.json" in report.passthrough_files_compared
