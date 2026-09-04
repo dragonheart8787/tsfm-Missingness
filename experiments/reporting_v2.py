@@ -43,6 +43,7 @@ be perturbed by a float round-trip. ``compare_reporting_versions`` proves it.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,6 +90,18 @@ INTERPRETATION_B: dict[str, str] = {
     ),
 }
 
+# The erratum note, defined ONCE. The builder writes this exact string and the
+# verifier requires exact equality against it. A note that merely exists, or
+# that paraphrases this, is rejected: an erratum whose own explanatory text can
+# drift is not an auditable record.
+ERRATUM_NOTE = (
+    "Reporting erratum only: B_g's comparison arm was described using the "
+    "R_g interpretation text, which names truncated_long. B_g's arm is and "
+    "always was internal_block(g, d=16). No number, interval, p-value, "
+    "reading, SESOI, dose-response result or classification is affected. "
+    f"See {ERRATUM_DOC}."
+)
+
 # Columns a v2 row is permitted to differ in or to add. Everything else must
 # carry across byte-for-byte.
 DESCRIPTION_COLUMNS = ("interpretation",)
@@ -97,6 +110,43 @@ ADDED_COLUMNS = ("comparison_arm", "reporting_version", "erratum_id")
 ADDED_ROOT_KEYS = ("reporting_version", "erratum_id", "erratum_note")
 # Keys the v2 payload may add inside a contrast row.
 ADDED_ROW_KEYS = ("comparison_arm",)
+
+# Exact expected values for every whitelisted root addition. Presence is not
+# enough; each must match.
+EXPECTED_ROOT_VALUES: dict[str, str] = {
+    "reporting_version": REPORTING_VERSION,
+    "erratum_id": ERRATUM_ID,
+    "erratum_note": ERRATUM_NOTE,
+}
+
+# The ONLY file that may carry root-level or contrast-row additions. The other
+# two analysis JSONs are pure pass-through.
+PAYLOAD_FILE = "trailing_gap_analysis.json"
+
+# The whitelist is PATH-SPECIFIC, not name-based. `comparison_arm` is permitted
+# at exactly these locations inside trailing_gap_analysis.json:
+#
+#     r_contrasts[i]        b_contrasts[i]
+#
+# and nowhere else. A key called `comparison_arm` appearing in
+# classification.json, in dose_response.json, or in any other nested object —
+# `classification.comparison_arm`, say — is a VIOLATION, not a permitted
+# addition that happened to share a name.
+CONTRAST_ROW_PATH = re.compile(r"^[rb]_contrasts\[\d+\]$")
+# Likewise for the one rewritten leaf: only B's interpretation, only inside a
+# b_contrasts row.
+B_INTERPRETATION_PATH = re.compile(r"^b_contrasts\[\d+\]\.interpretation$")
+
+# Source artifacts that must all be present. A missing one is a hard failure,
+# never a silently skipped comparison: an identity check that quietly compares
+# four files instead of five proves nothing about the fifth.
+REQUIRED_SOURCE_FILES = (
+    "R_contrasts.csv",
+    "B_contrasts.csv",
+    "trailing_gap_analysis.json",
+    "classification.json",
+    "dose_response.json",
+)
 
 
 class ReportingV2Error(RuntimeError):
@@ -113,11 +163,29 @@ class IdentityReport:
     numeric_fields_compared: int = 0
     # A REWRITTEN value: B's interpretation text. This is the erratum itself.
     interpretation_changes: list[str] = field(default_factory=list)
-    # An ADDED field on the whitelist. A different category from a rewrite:
-    # nothing that existed before was altered.
-    whitelisted_additions: list[str] = field(default_factory=list)
     passthrough_files_compared: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
+
+    # --- ADDITIONS, counted per category ------------------------------------ #
+    # Additions are a different category from a rewrite: nothing that existed
+    # before was altered. They are reported per category and never as one
+    # number, because no single count is the total. In particular
+    # ``json_contrast_arm_additions`` is 8 on the real ETTh1 data — four
+    # ``r_contrasts[i].comparison_arm`` and four ``b_contrasts[i].comparison_arm``
+    # — and that 8 is NOT the total of everything added. The CSV column
+    # additions and the JSON root additions are separate, and larger.
+    json_contrast_arm_additions: list[str] = field(default_factory=list)
+    json_root_additions: list[str] = field(default_factory=list)
+    csv_column_additions: list[str] = field(default_factory=list)
+    csv_added_cells: int = 0
+
+    def total_additions(self) -> int:
+        """Every added value, across every file and category."""
+        return (
+            len(self.json_contrast_arm_additions)
+            + len(self.json_root_additions)
+            + self.csv_added_cells
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -128,8 +196,20 @@ class IdentityReport:
             "passthrough_files_compared": self.passthrough_files_compared,
             "n_interpretation_changes": len(self.interpretation_changes),
             "interpretation_changes": self.interpretation_changes,
-            "n_whitelisted_additions": len(self.whitelisted_additions),
-            "whitelisted_additions": self.whitelisted_additions,
+            "additions": {
+                "note": (
+                    "Counted per category. No single count below is the total; "
+                    "total_additions is."
+                ),
+                "n_json_contrast_arm_additions": len(self.json_contrast_arm_additions),
+                "json_contrast_arm_additions": self.json_contrast_arm_additions,
+                "n_json_root_additions": len(self.json_root_additions),
+                "json_root_additions": self.json_root_additions,
+                "n_csv_column_additions": len(self.csv_column_additions),
+                "csv_column_additions": self.csv_column_additions,
+                "n_csv_added_cells": self.csv_added_cells,
+                "total_additions": self.total_additions(),
+            },
             "violations": self.violations,
         }
 
@@ -160,6 +240,24 @@ def _correct_contrast_csv(path: Path, out_path: Path, *, family: str) -> None:
     frame.to_csv(out_path, index=False)
 
 
+def require_source_files(analysis_dir: Path, *, what: str = "source") -> None:
+    """Every one of REQUIRED_SOURCE_FILES must be present. Hard failure if not.
+
+    Checked individually and reported by name, so the failure says which file is
+    absent rather than that "something" is. Skipping a missing artifact would
+    make both the build and the identity check vacuous for that artifact: a
+    comparison that never opens ``dose_response.json`` proves nothing about it,
+    yet would still report ``identical=True``.
+    """
+    missing = [n for n in REQUIRED_SOURCE_FILES if not (Path(analysis_dir) / n).is_file()]
+    if missing:
+        raise ReportingV2Error(
+            f"required {what} artifact(s) missing from {analysis_dir}: "
+            f"{', '.join(missing)}. All of {', '.join(REQUIRED_SOURCE_FILES)} must "
+            f"be present; a partial analysis directory cannot be corrected or verified."
+        )
+
+
 def build_reporting_v2(analysis_dir: Path, out_dir: Path | None = None) -> Path:
     """Emit analysis_reporting_v2/ beside an existing analysis/ directory.
 
@@ -169,6 +267,7 @@ def build_reporting_v2(analysis_dir: Path, out_dir: Path | None = None) -> Path:
     out_dir = Path(out_dir) if out_dir else analysis_dir.parent / REPORTING_VERSION
     if not analysis_dir.is_dir():
         raise ReportingV2Error(f"{analysis_dir} is not a directory")
+    require_source_files(analysis_dir)
     # Same discipline as the runbook's initialization guard: never write into a
     # directory that could retain stale files from an earlier run, which would
     # silently mix two v2 builds and defeat the pass-through byte check.
@@ -181,32 +280,24 @@ def build_reporting_v2(analysis_dir: Path, out_dir: Path | None = None) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for name, family in (("R_contrasts.csv", "R"), ("B_contrasts.csv", "B")):
-        source = analysis_dir / name
-        if not source.exists():
-            raise ReportingV2Error(f"{source} is missing")
-        _correct_contrast_csv(source, out_dir / name, family=family)
+        _correct_contrast_csv(analysis_dir / name, out_dir / name, family=family)
 
-    # trailing_gap_analysis.json carries the same b_contrasts prose.
-    payload_path = analysis_dir / "trailing_gap_analysis.json"
-    if payload_path.exists():
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        for row in payload.get("b_contrasts", []):
-            row["interpretation"] = INTERPRETATION_B[row["reading"]]
-            row["comparison_arm"] = COMPARISON_ARM["B"]
-        for row in payload.get("r_contrasts", []):
-            row["comparison_arm"] = COMPARISON_ARM["R"]
-        payload["reporting_version"] = REPORTING_VERSION
-        payload["erratum_id"] = ERRATUM_ID
-        payload["erratum_note"] = (
-            "Reporting erratum only: B_g's comparison arm was described using the "
-            "R_g interpretation text, which names truncated_long. B_g's arm is and "
-            "always was internal_block(g, d=16). No number, interval, p-value, "
-            "reading, SESOI, dose-response result or classification is affected. "
-            f"See {ERRATUM_DOC}."
-        )
-        (out_dir / "trailing_gap_analysis.json").write_text(
-            json.dumps(payload, indent=2, default=str), encoding="utf-8"
-        )
+    # trailing_gap_analysis.json carries the same b_contrasts prose. It is a
+    # required source, so this is unconditional: a build that silently omitted
+    # it would emit a v2 whose payload still carried the wrong arm.
+    payload_path = analysis_dir / PAYLOAD_FILE
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    for row in payload.get("b_contrasts", []):
+        row["interpretation"] = INTERPRETATION_B[row["reading"]]
+        row["comparison_arm"] = COMPARISON_ARM["B"]
+    for row in payload.get("r_contrasts", []):
+        row["comparison_arm"] = COMPARISON_ARM["R"]
+    payload["reporting_version"] = REPORTING_VERSION
+    payload["erratum_id"] = ERRATUM_ID
+    payload["erratum_note"] = ERRATUM_NOTE
+    (out_dir / PAYLOAD_FILE).write_text(
+        json.dumps(payload, indent=2, default=str), encoding="utf-8"
+    )
 
     # Everything else is copied through untouched.
     for source in sorted(analysis_dir.iterdir()):
@@ -246,11 +337,16 @@ def _compare_csv(v1: Path, v2: Path, *, family: str, report: IdentityReport) -> 
     if missing_cols:
         report.violations.append(f"{v1.name}: v2 dropped column(s) {missing_cols}")
         return
-    unexpected = [c for c in b.columns if c not in a.columns and c not in ADDED_COLUMNS]
+    added = [c for c in b.columns if c not in a.columns]
+    unexpected = [c for c in added if c not in ADDED_COLUMNS]
     if unexpected:
         report.violations.append(
             f"{v1.name}: v2 added column(s) not on the whitelist: {unexpected}"
         )
+    for column in added:
+        if column in ADDED_COLUMNS:
+            report.csv_column_additions.append(f"{v1.name}:{column}")
+            report.csv_added_cells += len(b)
 
     # --- original values ---------------------------------------------------- #
     for column in a.columns:
@@ -301,70 +397,104 @@ def _compare_csv(v1: Path, v2: Path, *, family: str, report: IdentityReport) -> 
 
 
 def _compare_json(v1: Path, v2: Path, report: IdentityReport) -> None:
+    """Compare one analysis JSON, whitelisting additions BY PATH, not by name.
+
+    The whitelist is a set of locations, not a set of key names. ``comparison_arm``
+    is permitted only at ``trailing_gap_analysis.json:r_contrasts[i]`` and
+    ``:b_contrasts[i]``. The same key appearing anywhere else — inside
+    ``classification``, inside ``dose_response``, at any depth, or in either of
+    the other two JSON files — is a violation. A name-based whitelist would have
+    waved it through purely because the string matched.
+    """
     a = json.loads(v1.read_text(encoding="utf-8"))
     b = json.loads(v2.read_text(encoding="utf-8"))
     report.files_compared.append(v1.name)
+    is_payload = v1.name == PAYLOAD_FILE
 
-    def walk(x: Any, y: Any, path: str, *, in_b_contrast: bool) -> None:
+    def addition_is_permitted(path: str, key: str) -> bool:
+        """A nested key v2 invented. Permitted at exactly two path shapes."""
+        return (
+            is_payload
+            and key in ADDED_ROW_KEYS
+            and CONTRAST_ROW_PATH.match(path) is not None
+        )
+
+    def rewrite_is_permitted(path: str) -> bool:
+        """A pre-existing leaf v2 changed. Only B's interpretation text."""
+        return is_payload and B_INTERPRETATION_PATH.match(path) is not None
+
+    def walk(x: Any, y: Any, path: str) -> None:
         if isinstance(x, dict):
             if not isinstance(y, dict):
-                report.violations.append(f"{path}: type changed")
+                report.violations.append(f"{v1.name}:{path}: type changed")
                 return
             for key in x:
                 if key not in y:
-                    report.violations.append(f"{path}.{key}: dropped in v2")
+                    report.violations.append(f"{v1.name}:{path}.{key}: dropped in v2")
                     continue
-                walk(x[key], y[key], f"{path}.{key}",
-                     in_b_contrast=in_b_contrast or path.endswith("b_contrasts"))
-            # Any key v2 invented inside a nested object is a violation unless
-            # it is a whitelisted per-row addition.
+                walk(x[key], y[key], f"{path}.{key}")
             for key in y:
                 if key in x:
                     continue
-                if key in ADDED_ROW_KEYS:
-                    report.whitelisted_additions.append(f"{path}.{key}")
+                if addition_is_permitted(path, key):
+                    report.json_contrast_arm_additions.append(f"{v1.name}:{path}.{key}")
                 else:
                     report.violations.append(
-                        f"{path}.{key}: key not on the whitelist appeared in v2"
+                        f"{v1.name}:{path}.{key}: key not on the whitelist appeared "
+                        f"in v2 (additions are permitted only at "
+                        f"{PAYLOAD_FILE}:r_contrasts[i] / b_contrasts[i])"
                     )
             return
         if isinstance(x, list):
             if not isinstance(y, list) or len(x) != len(y):
-                report.violations.append(f"{path}: list length changed")
+                report.violations.append(f"{v1.name}:{path}: list length changed")
                 return
             for i, (xi, yi) in enumerate(zip(x, y)):
-                walk(xi, yi, f"{path}[{i}]", in_b_contrast=in_b_contrast)
+                walk(xi, yi, f"{path}[{i}]")
             return
         report.values_compared += 1
         if isinstance(x, (int, float)) and not isinstance(x, bool):
             report.numeric_fields_compared += 1
         if x == y:
             return
-        leaf = path.rsplit(".", 1)[-1]
-        if in_b_contrast and leaf in DESCRIPTION_COLUMNS:
+        if rewrite_is_permitted(path):
             report.interpretation_changes.append(path)
         else:
-            report.violations.append(f"{path}: {x!r} -> {y!r}")
+            report.violations.append(f"{v1.name}:{path}: {x!r} -> {y!r}")
 
     for key in a:
         if key not in b:
-            report.violations.append(f"{key}: dropped in v2")
+            report.violations.append(f"{v1.name}:{key}: dropped in v2")
             continue
-        walk(a[key], b[key], key, in_b_contrast=key == "b_contrasts")
+        walk(a[key], b[key], key)
 
-    # Root-level additions must be exactly the documented ones, with the
-    # documented values.
+    # --- root-level additions ------------------------------------------------ #
+    # Permitted only in the payload file, only the documented keys, and each
+    # must EQUAL its documented value. Presence alone is never sufficient.
     for key in b:
         if key in a:
             continue
-        if key not in ADDED_ROOT_KEYS:
+        if not is_payload or key not in ADDED_ROOT_KEYS:
             report.violations.append(
-                f"{v1.name}: root key {key!r} is not on the whitelist"
+                f"{v1.name}: root key {key!r} is not on the whitelist "
+                f"(root additions are permitted only in {PAYLOAD_FILE})"
             )
             continue
-        expected = {"reporting_version": REPORTING_VERSION, "erratum_id": ERRATUM_ID}.get(key)
-        if expected is not None and b[key] != expected:
-            report.violations.append(f"{v1.name}.{key}: {b[key]!r} != {expected!r}")
+        report.json_root_additions.append(f"{v1.name}:{key}")
+        expected = EXPECTED_ROOT_VALUES[key]
+        if b[key] != expected:
+            report.violations.append(
+                f"{v1.name}.{key} does not match its single defined value: "
+                f"{b[key]!r} != {expected!r}"
+            )
+
+    if not is_payload:
+        return
+
+    # --- the payload's own required additions -------------------------------- #
+    for key in ADDED_ROOT_KEYS:
+        if key not in b:
+            report.violations.append(f"{v1.name}: required root key {key!r} is missing")
 
     # Every B contrast row must carry the corrected text and the correct arm.
     for i, row in enumerate(b.get("b_contrasts", [])):
@@ -415,21 +545,24 @@ def compare_reporting_versions(analysis_dir: Path, v2_dir: Path) -> IdentityRepo
          and the version/erratum markers match;
       3. nothing else appeared — no unwhitelisted column, JSON key, or file,
          and every pass-through file is byte-identical.
+
+    Raises ReportingV2Error if any of REQUIRED_SOURCE_FILES is absent on either
+    side. That is deliberate: a missing artifact must fail, never be skipped.
     """
     analysis_dir, v2_dir = Path(analysis_dir), Path(v2_dir)
+    # Hard failure before any comparison begins. Every required artifact must
+    # exist on BOTH sides; otherwise a comparison would quietly skip it and
+    # still report identical=True, which is worse than no check at all.
+    require_source_files(analysis_dir, what="source")
+    require_source_files(v2_dir, what="v2")
     report = IdentityReport()
 
     for name, family in (("R_contrasts.csv", "R"), ("B_contrasts.csv", "B")):
-        v1, v2 = analysis_dir / name, v2_dir / name
-        if not v1.exists() or not v2.exists():
-            report.violations.append(f"{name}: missing on one side")
-            continue
-        _compare_csv(v1, v2, family=family, report=report)
+        _compare_csv(analysis_dir / name, v2_dir / name, family=family, report=report)
 
-    for name in ("trailing_gap_analysis.json", "classification.json", "dose_response.json"):
-        v1, v2 = analysis_dir / name, v2_dir / name
-        if v1.exists() and v2.exists():
-            _compare_json(v1, v2, report)
+    for name in REQUIRED_SOURCE_FILES:
+        if name.endswith(".json"):
+            _compare_json(analysis_dir / name, v2_dir / name, report)
 
     if analysis_dir.is_dir() and v2_dir.is_dir():
         _compare_passthrough(analysis_dir, v2_dir, report)

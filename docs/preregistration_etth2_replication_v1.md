@@ -129,7 +129,9 @@ Two **separately corrected** Holm families of 4, `{R_16..R_128}` and
 `{B_16..B_128}`, corrected separately from each other and from every family
 in the ETTh1 work. "Separately corrected" is a multiplicity-control choice
 and **is not a claim that the families are statistically independent** — they
-share the `trailing_nan(g)` arm and are positively dependent. See §5.1.
+are not assumed statistically independent because they share origins and the
+`trailing_nan` arm. No direction is asserted for that dependence; nothing here
+derives its sign. See §5.1.
 
 ### 3.1 `B_g` remains secondary and content-confounded
 
@@ -188,11 +190,18 @@ CI lying entirely inside ±delta. Non-significance is never equivalence.
 `±delta_ETTh2`. No additional Holm or Bonferroni correction is applied to the
 intersection.**
 
-This is the standard treatment for an intersection (AND) claim. To falsely
-assert that the whole intersection holds, *every* component must be a
-simultaneous false positive, so the family-wise error rate of the intersection
-claim is already conservative relative to any single component's nominal level.
-A union (OR) claim would need correction; an intersection does not.
+This is the standard intersection-union test (IUT) treatment of an
+intersection (AND) claim. The argument is:
+
+> Under the global null, at least one component equivalence null is true.
+> Rejecting the global null requires rejecting every component null, including
+> that true null. Therefore the probability of a false global rejection is no
+> greater than the size of any true component test, regardless of dependence.
+
+The last clause is the point: the bound holds whatever the dependence structure
+among the three components, so no assumption about their correlation is needed
+and none is made. A union (OR) claim would need correction; an intersection
+does not.
 
 **Holm correction is retained across the four `R` gaps for material directional
 readings only** — `MATERIAL_POSITIVE` / `MATERIAL_NEGATIVE`. The equivalence
@@ -203,10 +212,12 @@ correction.
 correction across its four gaps.
 
 > **`R` and `B` are separately corrected. They are NOT statistically
-> independent, and nothing in this document may describe them as such.** Both
-> families share the `trailing_nan(g)` arm and the same origins; separate
-> correction is a multiplicity-control choice, not an independence claim. The
-> two must not be conflated.
+> independent, and nothing in this document may describe them as such.** They
+> are not assumed statistically independent because they share origins and the
+> `trailing_nan` arm. Separate correction is a multiplicity-control choice, not
+> an independence claim. **No sign is claimed for the dependence** — this
+> document asserts non-independence only, never its direction, because nothing
+> here derives one. The two must not be conflated.
 
 ### 5.2 Primary reporting outcomes
 

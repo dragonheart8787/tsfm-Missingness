@@ -50,8 +50,20 @@ def main() -> int:
           f"(B_g only — this IS the erratum)")
     for where in report.interpretation_changes:
         print(f"      {where}")
-    print(f"  whitelisted additions   : {len(report.whitelisted_additions)} "
-          f"(new fields; nothing pre-existing altered)")
+    # Additions, per category. Deliberately NOT summed into one headline
+    # number: the 8 below counts JSON contrast-row arms only, and reporting it
+    # alone would read as a total of everything added, which it is not.
+    print("  additions (nothing pre-existing altered) — per category, not a total:")
+    print(f"      json contrast-row arm additions : "
+          f"{len(report.json_contrast_arm_additions)}  "
+          f"(comparison_arm on r_contrasts[i] / b_contrasts[i])")
+    print(f"      json root additions             : "
+          f"{len(report.json_root_additions)}  "
+          f"({', '.join(k.split(':')[-1] for k in report.json_root_additions)})")
+    print(f"      csv column additions            : "
+          f"{len(report.csv_column_additions)} columns = "
+          f"{report.csv_added_cells} cells")
+    print(f"      TOTAL added values              : {report.total_additions()}")
     (out_dir / "identity_check.json").write_text(
         json.dumps(report.as_dict(), indent=2), encoding="utf-8"
     )

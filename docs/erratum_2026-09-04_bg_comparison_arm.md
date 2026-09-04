@@ -114,6 +114,12 @@ slipped through. The check now rejects:
 | A wrong `reporting_version` / `erratum_id` | Provenance markers must be exact |
 | Any CSV column not on the whitelist | Editorial commentary cannot be smuggled in |
 | Any JSON key not on the whitelist, at root or in a row | A planted numeric field has nothing to compare against |
+| A whitelisted key name at a **non-whitelisted path** | `classification.comparison_arm` is not a contrast row; matching the name is not enough |
+| A root addition in `classification.json` / `dose_response.json` | Only the payload file may gain root keys |
+| An `erratum_note` whose text differs from `ERRATUM_NOTE` | The erratum's own explanation must not drift |
+| A missing `erratum_note` | Presence is required, not merely permitted |
+| An `erratum_note` in the wrong file or wrong object | Right text, wrong place, is still wrong |
+| Any of the five required artifacts absent, either side | A skipped file would still report `identical=True` |
 | A missing, extra, or modified pass-through file | Byte-identity required on anything meant to pass through |
 | A pre-existing, non-empty output directory | Stale files from an earlier build would survive |
 
@@ -123,9 +129,41 @@ The whitelist is exactly: the contrast-row `comparison_arm`,
 non-description cells are compared byte-for-byte and cannot be perturbed by a
 float round-trip.
 
+**The JSON whitelist is a set of PATHS, not a set of key names.**
+`comparison_arm` is permitted at exactly two locations —
+`trailing_gap_analysis.json:r_contrasts[i]` and `:b_contrasts[i]` — and nowhere
+else. The same key inside `classification`, inside `dose_response`, at any
+greater depth, or in `classification.json` / `dose_response.json` is a
+violation. A name-based whitelist would have accepted
+`classification.comparison_arm = "NOT A CONTRAST ROW"` purely because the
+string matched; a path-based one rejects it. The single rewritten leaf is
+likewise path-bound: only `b_contrasts[i].interpretation`.
+
+**`erratum_note` is validated by content, not by presence.** Its text is
+defined once, as `experiments/reporting_v2.ERRATUM_NOTE`, used by both the
+builder and the verifier, and checked by exact equality. An altered note, a
+missing note, and a correctly worded note placed in the wrong file or the wrong
+object are all rejected. An erratum whose own explanatory text can drift is not
+an auditable record.
+
+**All five source artifacts are required.** `R_contrasts.csv`,
+`B_contrasts.csv`, `trailing_gap_analysis.json`, `classification.json` and
+`dose_response.json` must each be present, on both sides, before any comparison
+begins; a missing one raises rather than being skipped. A check that quietly
+compares four files and still reports `identical=True` proves nothing about the
+fifth.
+
 Two categories are reported separately, because they are not the same thing: an
 **interpretation change** rewrites a pre-existing value (this is the erratum),
-whereas a **whitelisted addition** adds a new field and alters nothing.
+whereas an **addition** adds a new field and alters nothing.
+
+**Additions are counted per category, and no single count is the total.** The
+familiar `8` is JSON contrast-row `comparison_arm` additions only — four in
+`r_contrasts[]`, four in `b_contrasts[]`. The CSV column additions (3 columns ×
+2 files = 6 columns, 24 cells) and the JSON root additions (3 keys) are
+separate, and together larger. The tool prints each category with its own
+count plus an explicit `TOTAL added values`; it never prints one number that
+could be read as the grand total.
 
 ```bash
 python scripts/build_reporting_v2.py \
@@ -142,7 +180,11 @@ values compared         : 536
 numeric fields compared : 363
 pass-through files      : 4   (byte-identical)
 interpretation changes  : 8   (B_16, B_32, B_64, B_128 — in the CSV and the payload)
-whitelisted additions   : 8   (comparison_arm on all 8 contrast rows)
+additions — per category, NOT a total:
+    json contrast-row arm additions : 8    (comparison_arm on r_contrasts[i] / b_contrasts[i])
+    json root additions             : 3    (reporting_version, erratum_id, erratum_note)
+    csv column additions            : 6 columns = 24 cells
+    TOTAL added values              : 35
 classification          : INCONCLUSIVE / mixed_equivalent_and_unresolved (unchanged)
 ```
 
@@ -161,11 +203,11 @@ The counts are structural, not numeric — they depend on the schema and the
 readings, both of which the replica reproduces exactly — so the match is strong
 evidence. It is **not** a run against the real artifact, and this document does
 not claim it is. **Re-run the command above on the host holding
-`results/trailing_gap_v1/analysis/` and confirm 536 / 363 / 8 / 8 there.** A
+`results/trailing_gap_v1/analysis/` and confirm 536 / 363 / 8 there.** A
 different count is a real finding about the artifact, not a number to reconcile
 against this page.
 
-`tests/test_reporting_v2.py` (44 tests) covers this. Adversarial cases perturb,
+`tests/test_reporting_v2.py` (71 tests) covers this. Adversarial cases perturb,
 one at a time: the raw difference, both Holm CI bounds, the Holm-adjusted
 p-value, both 90% CI bounds, the SESOI, the fraction of positive origins, the
 median paired difference, a block-length estimate, a per-gap reading, the
@@ -176,6 +218,14 @@ unwhitelisted root JSON key, a rogue numeric field planted at root and inside a
 row, a modified pass-through file, a missing pass-through file, an unexpected
 extra file, a dropped row, and a dropped column. **Each must fail the identity
 check**, so a passing check is evidence rather than decoration.
+
+The path-specificity, note-content and required-file cases are covered the same
+way: `comparison_arm` planted in `classification`, in `dose_response`, and in
+each of the other two JSON files; an altered, a missing, and three
+structurally misplaced `erratum_note`s; and each of the five required
+artifacts removed **individually** — parametrised one file at a time, on the
+build path, the source side of the comparison, and the v2 side, so no case can
+pass because some other file's absence tripped the check first.
 
 ## 5. Scope
 

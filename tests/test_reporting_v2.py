@@ -26,6 +26,7 @@ from experiments.reporting_v2 import (
     ERRATUM_ID,
     INTERPRETATION_B,
     REPORTING_VERSION,
+    REQUIRED_SOURCE_FILES,
     ReportingV2Error,
     build_reporting_v2,
     compare_reporting_versions,
@@ -205,14 +206,47 @@ def test_identity_check_passes_and_reports_what_it_compared(analysis_dir):
     # On the real ETTh1 data all four B readings are MATERIAL_POSITIVE, which is
     # arm-specific, so all four change: four in the CSV and four again in the
     # payload = 8. The interpretation cells are the ONLY value differences;
-    # added columns are reported separately as whitelisted additions.
+    # additions are a separate category and are reported per category.
     interpretation_changes = report.interpretation_changes
     assert len(interpretation_changes) == 8, interpretation_changes
-    # Additions are a separate category: nothing pre-existing was altered.
-    assert all("comparison_arm" in w for w in report.whitelisted_additions)
     assert all("R_contrasts" not in w for w in interpretation_changes)
     for gap in ("B_16", "B_32", "B_64", "B_128"):
         assert any(gap in w for w in interpretation_changes), gap
+
+
+def test_addition_categories_are_counted_separately_and_8_is_not_the_total(analysis_dir):
+    """The '8' figure is JSON contrast-row arms ONLY, and must not read as a total.
+
+    Four r_contrasts[i].comparison_arm plus four b_contrasts[i].comparison_arm.
+    The CSV column additions and the JSON root additions are separate, and
+    together they outnumber it.
+    """
+    out = build_reporting_v2(analysis_dir)
+    report = compare_reporting_versions(analysis_dir, out)
+    assert report.identical, report.violations
+
+    assert len(report.json_contrast_arm_additions) == 8, report.json_contrast_arm_additions
+    assert all(a.endswith(".comparison_arm") for a in report.json_contrast_arm_additions)
+    assert sum("r_contrasts" in a for a in report.json_contrast_arm_additions) == 4
+    assert sum("b_contrasts" in a for a in report.json_contrast_arm_additions) == 4
+
+    # 3 root keys, in trailing_gap_analysis.json only.
+    assert len(report.json_root_additions) == 3, report.json_root_additions
+    assert all(a.startswith("trailing_gap_analysis.json:") for a in report.json_root_additions)
+
+    # 3 columns x 2 files = 6 columns, 4 rows each = 24 cells.
+    assert len(report.csv_column_additions) == 6, report.csv_column_additions
+    assert report.csv_added_cells == 24
+
+    # The headline number is NOT the total.
+    assert report.total_additions() == 8 + 3 + 24 == 35
+    assert report.total_additions() != len(report.json_contrast_arm_additions)
+
+    payload = report.as_dict()["additions"]
+    assert payload["n_json_contrast_arm_additions"] == 8
+    assert payload["total_additions"] == 35
+    # No key in the reported payload calls 8 a total.
+    assert "n_whitelisted_additions" not in payload
 
 
 def test_all_four_real_b_readings_are_arm_specific():
@@ -546,3 +580,171 @@ def test_passthrough_files_are_actually_compared(analysis_dir):
     assert "per_origin_slopes.csv" in report.passthrough_files_compared
     assert "classification.json" in report.passthrough_files_compared
     assert "dose_response.json" in report.passthrough_files_compared
+
+
+# --------------------------------------------------------------------------- #
+# Hardening round 2: the whitelist is a set of PATHS, not a set of key names;
+# the erratum note is checked by content; and a missing required source
+# artifact is a hard failure rather than a silently skipped comparison.
+# --------------------------------------------------------------------------- #
+
+def test_comparison_arm_outside_a_contrast_row_is_rejected(analysis_dir):
+    """A key that merely SHARES THE WHITELISTED NAME, at a path that is not a
+    contrast row, must be rejected. A name-based whitelist waves this through."""
+    out = build_reporting_v2(analysis_dir)
+    payload = json.loads((out / "trailing_gap_analysis.json").read_text(encoding="utf-8"))
+    payload["classification"]["comparison_arm"] = "NOT A CONTRAST ROW"
+    (out / "trailing_gap_analysis.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical, "comparison_arm planted in `classification` was accepted"
+    assert any("classification.comparison_arm" in v for v in report.violations), (
+        report.violations
+    )
+    # And it was NOT miscounted as a legitimate contrast-row addition.
+    assert len(report.json_contrast_arm_additions) == 8
+    assert all(
+        "classification" not in a for a in report.json_contrast_arm_additions
+    ), report.json_contrast_arm_additions
+
+
+@pytest.mark.parametrize(
+    "filename", ["classification.json", "dose_response.json"]
+)
+def test_comparison_arm_in_another_analysis_file_is_rejected(analysis_dir, filename):
+    """Contrast-row additions are permitted in the payload file ONLY."""
+    out = build_reporting_v2(analysis_dir)
+    payload = json.loads((out / filename).read_text(encoding="utf-8"))
+    payload["comparison_arm"] = COMPARISON_ARM["B"]
+    (out / filename).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical, f"comparison_arm accepted in {filename}"
+    assert any("comparison_arm" in v for v in report.violations), report.violations
+
+
+def test_comparison_arm_nested_deeper_than_a_contrast_row_is_rejected(analysis_dir):
+    """`r_contrasts[i]` is a permitted path; anything below it is not."""
+    out = build_reporting_v2(analysis_dir)
+    payload = json.loads((out / "trailing_gap_analysis.json").read_text(encoding="utf-8"))
+    payload["dose_response"]["comparison_arm"] = COMPARISON_ARM["R"]
+    (out / "trailing_gap_analysis.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical
+    assert any("dose_response.comparison_arm" in v for v in report.violations)
+
+
+def test_altered_erratum_note_is_rejected(analysis_dir):
+    """Presence is not enough; the note must equal its single defined value."""
+    from experiments.reporting_v2 import ERRATUM_NOTE
+
+    out = build_reporting_v2(analysis_dir)
+    payload = json.loads((out / "trailing_gap_analysis.json").read_text(encoding="utf-8"))
+    assert payload["erratum_note"] == ERRATUM_NOTE
+    payload["erratum_note"] = ERRATUM_NOTE.replace(
+        "No number, interval", "Some numbers, intervals"
+    )
+    (out / "trailing_gap_analysis.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical, "a rewritten erratum note was accepted"
+    assert any("erratum_note" in v and "does not match" in v for v in report.violations), (
+        report.violations
+    )
+
+
+def test_missing_erratum_note_is_rejected(analysis_dir):
+    out = build_reporting_v2(analysis_dir)
+    payload = json.loads((out / "trailing_gap_analysis.json").read_text(encoding="utf-8"))
+    del payload["erratum_note"]
+    (out / "trailing_gap_analysis.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical, "a v2 with no erratum note was accepted"
+    assert any(
+        "erratum_note" in v and "missing" in v for v in report.violations
+    ), report.violations
+
+
+@pytest.mark.parametrize(
+    "where", ["wrong_file", "inside_a_contrast_row", "nested_object"]
+)
+def test_structurally_misplaced_erratum_note_is_rejected(analysis_dir, where):
+    """The right text in the wrong place is still wrong — the same
+    path-specificity that item 1 applies to `comparison_arm`."""
+    from experiments.reporting_v2 import ERRATUM_NOTE
+
+    out = build_reporting_v2(analysis_dir)
+    if where == "wrong_file":
+        target = out / "classification.json"
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        payload["erratum_note"] = ERRATUM_NOTE
+    else:
+        target = out / "trailing_gap_analysis.json"
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        if where == "inside_a_contrast_row":
+            payload["b_contrasts"][0]["erratum_note"] = ERRATUM_NOTE
+        else:
+            payload["classification"]["erratum_note"] = ERRATUM_NOTE
+    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    report = compare_reporting_versions(analysis_dir, out)
+    assert not report.identical, f"a misplaced erratum note ({where}) was accepted"
+    assert any("erratum_note" in v for v in report.violations), report.violations
+
+
+def test_the_erratum_note_is_defined_exactly_once(analysis_dir):
+    """One constant, used by both the builder and the verifier."""
+    from experiments.reporting_v2 import ERRATUM_NOTE, EXPECTED_ROOT_VALUES
+
+    assert EXPECTED_ROOT_VALUES["erratum_note"] is ERRATUM_NOTE
+    source = (REPO_ROOT / "experiments" / "reporting_v2.py").read_text(encoding="utf-8")
+    # The literal text appears once: in the constant's own definition.
+    assert source.count("Reporting erratum only:") == 1
+    out = build_reporting_v2(analysis_dir)
+    payload = json.loads((out / "trailing_gap_analysis.json").read_text(encoding="utf-8"))
+    assert payload["erratum_note"] == ERRATUM_NOTE
+
+
+@pytest.mark.parametrize("filename", list(REQUIRED_SOURCE_FILES))
+def test_build_hard_fails_on_each_individually_missing_source_file(analysis_dir, filename):
+    """Non-vacuity: EACH of the five, removed on its own, must fail the build.
+
+    Parametrised one file at a time. A single combined test could pass because
+    some other file's absence tripped the check, proving nothing about this one.
+    """
+    (analysis_dir / filename).unlink()
+    with pytest.raises(ReportingV2Error, match="required source artifact"):
+        build_reporting_v2(analysis_dir)
+
+
+@pytest.mark.parametrize("filename", list(REQUIRED_SOURCE_FILES))
+def test_compare_hard_fails_on_each_individually_missing_source_file(
+    analysis_dir, filename, tmp_path
+):
+    """The same five, one at a time, on the comparison path."""
+    out = build_reporting_v2(analysis_dir)
+    (analysis_dir / filename).unlink()
+    with pytest.raises(ReportingV2Error, match="required source artifact"):
+        compare_reporting_versions(analysis_dir, out)
+
+
+@pytest.mark.parametrize("filename", list(REQUIRED_SOURCE_FILES))
+def test_compare_hard_fails_on_each_individually_missing_v2_file(analysis_dir, filename):
+    """A required artifact absent from v2 must fail too, not be skipped."""
+    out = build_reporting_v2(analysis_dir)
+    (out / filename).unlink()
+    with pytest.raises(ReportingV2Error, match="required v2 artifact"):
+        compare_reporting_versions(analysis_dir, out)
+
+
+def test_the_required_file_list_is_exactly_the_five_named_artifacts():
+    assert set(REQUIRED_SOURCE_FILES) == {
+        "R_contrasts.csv", "B_contrasts.csv", "trailing_gap_analysis.json",
+        "classification.json", "dose_response.json",
+    }
+    assert len(REQUIRED_SOURCE_FILES) == 5
