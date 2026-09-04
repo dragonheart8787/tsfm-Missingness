@@ -116,7 +116,9 @@ REQUIRED_SHARED_FIELDS = ("mock_model", "experiment", "phase", "execution_entryp
 EXPECTED_EXPERIMENT = "etth2-trailing-gap-replication-v1"
 EXPECTED_PHASE = "formal-full"
 EXPECTED_ENTRYPOINT = "experiments/run_etth2.py"
-# A revision that looks like this is a placeholder, not a checkpoint.
+# A revision that looks like this is a placeholder, not a checkpoint. Used ONLY
+# to recognise a declared-mock run's revision. It can never establish that a
+# revision is the RIGHT one — see expected_revision below.
 PLACEHOLDER_REVISION_PREFIXES = ("mock", "test", "fake", "dummy", "placeholder", "")
 MIN_REVISION_LENGTH = 7
 
@@ -143,20 +145,42 @@ class ProvenanceVerdict:
         return self.kind == PROVENANCE_REAL
 
 
-def _looks_like_a_real_revision(revision: Any) -> bool:
+def _looks_like_a_placeholder_revision(revision: Any) -> bool:
+    """Is this revision an obvious stand-in rather than a checkpoint hash?
+
+    Used only to recognise a MOCK run. It is deliberately NOT the test for a real
+    one: "not obviously fake" is not the same as "the pinned revision", and
+    treating it as such was the E3 bug — ``deadbeef`` passed as REAL.
+    """
     text = str(revision or "").strip().lower()
     if len(text) < MIN_REVISION_LENGTH:
-        return False
-    return not any(text.startswith(p) for p in PLACEHOLDER_REVISION_PREFIXES if p)
+        return True
+    return any(text.startswith(p) for p in PLACEHOLDER_REVISION_PREFIXES if p)
 
 
-def assess_provenance(run_dir: Path) -> ProvenanceVerdict:
+def assess_provenance(
+    run_dir: Path, *, expected_revision: str | None = None
+) -> ProvenanceVerdict:
     """Establish REAL / MOCK / INVALID_PROVENANCE from POSITIVE evidence only.
 
     A run is REAL only when the manifest and the summary EXPLICITLY and
     CONSISTENTLY establish every one of: ``mock_model`` false, the ETTh2
     experiment identity, the ``formal-full`` phase, the expected entrypoint, and
-    a real, non-placeholder model revision.
+    a ``model_contract.revision`` EQUAL — byte for byte — to
+    ``expected_revision``.
+
+    ``expected_revision`` is passed in, read from
+    ``pilot_config["model"]["revision"]`` by the caller. It is deliberately not
+    duplicated here: the pinned revision has exactly one source of truth in this
+    project, ``configs/pilot_config.yaml``, and a second copy could drift from it
+    silently.
+
+    Requiring EQUALITY rather than plausibility is the E4 fix. E3 asked only
+    whether the revision looked non-placeholder, so ``deadbeef`` — and any
+    well-formed but wrong 40-character hash — established REAL provenance for a
+    run produced against unknown weights. The comparison is exact: no trimming,
+    no case folding, no prefix matching. A trailing space or an uppercased hash
+    is a different string and therefore a different checkpoint claim.
 
     Nothing is inferred from absence. The earlier logic returned "real" whenever
     it failed to find a mock marker, so an empty ``{}`` manifest — or a manifest
@@ -228,6 +252,11 @@ def assess_provenance(run_dir: Path) -> ProvenanceVerdict:
     revision = (manifest.get("model_contract") or {}).get("revision")
     if revision is None:
         reasons.append("manifest carries no model_contract.revision")
+    if expected_revision is None:
+        reasons.append(
+            "no expected model revision was supplied, so the manifest's revision "
+            "cannot be checked against the pinned one"
+        )
 
     if reasons:
         return ProvenanceVerdict(PROVENANCE_INVALID, reasons, manifest, summary)
@@ -235,22 +264,36 @@ def assess_provenance(run_dir: Path) -> ProvenanceVerdict:
     # Only now, with everything present, well formed and agreeing, is the
     # mock/real question even askable.
     declared_mock = bool(manifest["mock_model"])
-    revision_is_real = _looks_like_a_real_revision(revision)
-    if declared_mock and revision_is_real:
+    is_placeholder = _looks_like_a_placeholder_revision(revision)
+    # EXACT equality. Not stripped, not case-folded, not prefix-matched: a
+    # revision that differs by a space or by case is a different string, and a
+    # run that recorded it did not record the pinned checkpoint.
+    matches_pin = revision == expected_revision
+
+    if declared_mock:
+        if not is_placeholder:
+            return ProvenanceVerdict(
+                PROVENANCE_INVALID,
+                [f"mock_model is true but model_contract.revision {revision!r} is "
+                 f"not a placeholder"],
+                manifest, summary,
+            )
+        return ProvenanceVerdict(PROVENANCE_MOCK, [], manifest, summary)
+
+    if not matches_pin:
+        detail = (
+            "it is a placeholder, not a checkpoint" if is_placeholder
+            else f"the pinned revision is {expected_revision!r}"
+        )
         return ProvenanceVerdict(
             PROVENANCE_INVALID,
-            [f"mock_model is true but model_contract.revision {revision!r} looks real"],
+            [f"mock_model is false but model_contract.revision {revision!r} is not "
+             f"the pinned revision: {detail}. A real result must be produced "
+             f"against the exact checkpoint the study pinned; anything else was "
+             f"produced against unknown weights."],
             manifest, summary,
         )
-    if not declared_mock and not revision_is_real:
-        return ProvenanceVerdict(
-            PROVENANCE_INVALID,
-            [f"mock_model is false but model_contract.revision {revision!r} is a "
-             f"placeholder, not a checkpoint"],
-            manifest, summary,
-        )
-    kind = PROVENANCE_MOCK if declared_mock else PROVENANCE_REAL
-    return ProvenanceVerdict(kind, [], manifest, summary)
+    return ProvenanceVerdict(PROVENANCE_REAL, [], manifest, summary)
 
 
 def gap_stats_from_rows(rows: list[dict[str, Any]], *, mean_clean_mae: float) -> list[GapStat]:
@@ -496,7 +539,12 @@ def analyse_etth2(
     effective = build_effective_config(pilot_config, etth2_config)
     official = Path(out_dir) if out_dir else run_dir / "analysis"
 
-    verdict = assess_provenance(run_dir)
+    # The pinned revision has ONE source of truth: configs/pilot_config.yaml,
+    # carried through the effective config. Read it here rather than copying the
+    # value into this module, where it could drift from the config silently.
+    verdict = assess_provenance(
+        run_dir, expected_revision=effective["model"]["revision"]
+    )
     if verdict.kind == PROVENANCE_INVALID:
         # A DIFFERENT failure class from a known mock. --allow-mock-analysis
         # does not reach here, by design: that flag analyses a run whose

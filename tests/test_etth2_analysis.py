@@ -451,12 +451,19 @@ from experiments.analyze_etth2 import (
     InvalidProvenance,
 )
 
+# The pinned revision, read from its ONE source of truth. Never a literal here:
+# a second copy in the tests could drift from the config and the tests would
+# then be asserting against the wrong value while passing.
+PINNED_REVISION = yaml.safe_load(
+    (REPO_ROOT / "configs" / "pilot_config.yaml").read_text(encoding="utf-8")
+)["model"]["revision"]
+
 REAL_MANIFEST = {
     "mock_model": False,
     "experiment": EXPECTED_EXPERIMENT,
     "phase": EXPECTED_PHASE,
     "execution_entrypoint": EXPECTED_ENTRYPOINT,
-    "model_contract": {"revision": "29ec3766d36d6f73f0696f85560a422f50e8498c"},
+    "model_contract": {"revision": PINNED_REVISION},
 }
 REAL_SUMMARY = {k: REAL_MANIFEST[k] for k in
                 ("mock_model", "experiment", "phase", "execution_entrypoint")}
@@ -477,14 +484,16 @@ def _run(tmp_path: Path, manifest, summary, name="run") -> Path:
 
 
 def test_a_legitimate_real_run_is_REAL(tmp_path):
-    verdict = assess_provenance(_run(tmp_path, REAL_MANIFEST, REAL_SUMMARY))
+    verdict = assess_provenance(_run(tmp_path, REAL_MANIFEST, REAL_SUMMARY),
+                              expected_revision=PINNED_REVISION)
     assert verdict.kind == PROVENANCE_REAL
     assert verdict.is_real and not verdict.is_mock
     assert verdict.reasons == []
 
 
 def test_a_legitimate_mock_run_is_MOCK(tmp_path):
-    verdict = assess_provenance(_run(tmp_path, MOCK_MANIFEST, MOCK_SUMMARY))
+    verdict = assess_provenance(_run(tmp_path, MOCK_MANIFEST, MOCK_SUMMARY),
+                              expected_revision=PINNED_REVISION)
     assert verdict.kind == PROVENANCE_MOCK
     assert verdict.is_mock and not verdict.is_real
 
@@ -514,15 +523,17 @@ def test_a_legitimate_mock_run_is_MOCK(tmp_path):
          "no model_contract.revision"),
         ("real flag, placeholder revision",
          dict(REAL_MANIFEST, model_contract={"revision": "mock-revision"}),
-         REAL_SUMMARY, "is a placeholder"),
-        ("mock flag, real revision",
-         dict(MOCK_MANIFEST,
-              model_contract={"revision": "29ec3766d36d6f73f0696f85560a422f50e8498c"}),
-         MOCK_SUMMARY, "looks real"),
+         REAL_SUMMARY, "is a placeholder, not a checkpoint"),
+        ("mock flag, pinned revision",
+         dict(MOCK_MANIFEST, model_contract={"revision": PINNED_REVISION}),
+         MOCK_SUMMARY, "is not a placeholder"),
     ],
 )
 def test_every_broken_provenance_case_is_INVALID(tmp_path, label, manifest, summary, needle):
-    verdict = assess_provenance(_run(tmp_path, manifest, summary, name=label[:20]))
+    verdict = assess_provenance(
+        _run(tmp_path, manifest, summary, name=label[:20]),
+        expected_revision=PINNED_REVISION,
+    )
     assert verdict.kind == PROVENANCE_INVALID, label
     assert any(needle in reason for reason in verdict.reasons), (label, verdict.reasons)
 
@@ -530,7 +541,9 @@ def test_every_broken_provenance_case_is_INVALID(tmp_path, label, manifest, summ
 def test_an_empty_directory_is_INVALID_not_real(tmp_path):
     run = tmp_path / "nothing"
     run.mkdir()
-    assert assess_provenance(run).kind == PROVENANCE_INVALID
+    assert assess_provenance(
+        run, expected_revision=PINNED_REVISION
+    ).kind == PROVENANCE_INVALID
 
 
 def test_unreadable_json_is_INVALID(tmp_path):
@@ -538,7 +551,7 @@ def test_unreadable_json_is_INVALID(tmp_path):
     run.mkdir()
     (run / "run_manifest.json").write_text("{not json", encoding="utf-8")
     (run / "run_summary.json").write_text(json.dumps(REAL_SUMMARY), encoding="utf-8")
-    verdict = assess_provenance(run)
+    verdict = assess_provenance(run, expected_revision=PINNED_REVISION)
     assert verdict.kind == PROVENANCE_INVALID
     assert any("unreadable" in r for r in verdict.reasons)
 
@@ -546,9 +559,12 @@ def test_unreadable_json_is_INVALID(tmp_path):
 def test_the_three_verdicts_are_distinct(tmp_path):
     """REAL, MOCK and INVALID must be three outcomes, not two plus a fallback."""
     kinds = {
-        assess_provenance(_run(tmp_path, REAL_MANIFEST, REAL_SUMMARY, "r")).kind,
-        assess_provenance(_run(tmp_path, MOCK_MANIFEST, MOCK_SUMMARY, "m")).kind,
-        assess_provenance(_run(tmp_path, {}, REAL_SUMMARY, "i")).kind,
+        assess_provenance(_run(tmp_path, REAL_MANIFEST, REAL_SUMMARY, "r"),
+                          expected_revision=PINNED_REVISION).kind,
+        assess_provenance(_run(tmp_path, MOCK_MANIFEST, MOCK_SUMMARY, "m"),
+                          expected_revision=PINNED_REVISION).kind,
+        assess_provenance(_run(tmp_path, {}, REAL_SUMMARY, "i"),
+                          expected_revision=PINNED_REVISION).kind,
     }
     assert kinds == {PROVENANCE_REAL, PROVENANCE_MOCK, PROVENANCE_INVALID}
 
@@ -585,3 +601,176 @@ def test_invalid_provenance_is_not_a_mock_refusal(tmp_path, config):
                       out_dir=tmp_path / "o")
     assert not issubclass(InvalidProvenance, MockAnalysisRefused)
     assert not issubclass(MockAnalysisRefused, InvalidProvenance)
+
+
+# --------------------------------------------------------------------------- #
+# E4: REAL provenance requires the EXACT pinned revision
+#
+# E3 asked only whether a revision looked non-placeholder, so `deadbeef` — and
+# any well-formed but wrong 40-character hash — established REAL provenance for
+# a run produced against unknown weights. These tests pin the comparison to
+# equality and prove it is not a length check, not a format check, not
+# case-insensitive, and not whitespace-tolerant.
+# --------------------------------------------------------------------------- #
+
+def _with_revision(tmp_path: Path, revision, *, mock: bool = False, name="rev") -> Path:
+    manifest = dict(
+        MOCK_MANIFEST if mock else REAL_MANIFEST,
+        model_contract={"revision": revision},
+    )
+    summary = MOCK_SUMMARY if mock else REAL_SUMMARY
+    return _run(tmp_path, manifest, summary, name=name)
+
+
+def _kind(tmp_path: Path, revision, *, mock: bool = False, name="rev") -> str:
+    return assess_provenance(
+        _with_revision(tmp_path, revision, mock=mock, name=name),
+        expected_revision=PINNED_REVISION,
+    ).kind
+
+
+def test_the_pinned_revision_has_exactly_one_source_of_truth():
+    """No second copy of the hash may live in analyze_etth2.py."""
+    source = (REPO_ROOT / "experiments" / "analyze_etth2.py").read_text(encoding="utf-8")
+    assert PINNED_REVISION not in source, (
+        "the pinned revision is duplicated in analyze_etth2.py; it must be read "
+        "from pilot_config['model']['revision'] at call time"
+    )
+    # ...and the config really is where it comes from.
+    assert len(PINNED_REVISION) == 40
+    assert PINNED_REVISION == "29ec3766d36d6f73f0696f85560a422f50e8498c"
+
+
+def test_the_exact_pinned_revision_is_REAL(tmp_path):
+    """Positive control. Without this every rejection below is vacuous."""
+    assert _kind(tmp_path, PINNED_REVISION, name="exact") == PROVENANCE_REAL
+
+
+def test_deadbeef_is_INVALID_not_REAL(tmp_path):
+    """The reproduction case: E3 returned REAL for this."""
+    verdict = assess_provenance(
+        _with_revision(tmp_path, "deadbeef", name="deadbeef"),
+        expected_revision=PINNED_REVISION,
+    )
+    assert verdict.kind == PROVENANCE_INVALID
+    assert any("not the pinned revision" in r for r in verdict.reasons), verdict.reasons
+    assert any("unknown weights" in r for r in verdict.reasons)
+
+
+@pytest.mark.parametrize(
+    "revision,why",
+    [
+        ("0000000000000000000000000000000000000000", "a different well-formed 40-char SHA"),
+        ("ffffffffffffffffffffffffffffffffffffffff", "another well-formed 40-char SHA"),
+        ("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "a plausible-looking wrong SHA"),
+    ],
+)
+def test_a_plausible_but_wrong_40_char_sha_is_INVALID(tmp_path, revision, why):
+    """Proves this is not merely a length or format check.
+
+    Each of these is exactly 40 lowercase hex characters — indistinguishable
+    from the real thing by shape alone, and every one of them is a different
+    checkpoint.
+    """
+    assert len(revision) == len(PINNED_REVISION) == 40
+    assert revision != PINNED_REVISION
+    assert _kind(tmp_path, revision, name=revision[:12]) == PROVENANCE_INVALID, why
+
+
+@pytest.mark.parametrize(
+    "mutate,label",
+    [
+        (lambda r: "a" + r, "one extra leading character"),
+        (lambda r: r + "a", "one extra trailing character"),
+        (lambda r: r[:-1] + ("d" if r[-1] != "d" else "e"), "last character changed"),
+        (lambda r: ("d" if r[0] != "d" else "e") + r[1:], "first character changed"),
+        (lambda r: r[:-1], "one character truncated"),
+        (lambda r: r[:20], "truncated to a 20-char prefix"),
+        (lambda r: r[20:], "only the 20-char suffix"),
+    ],
+)
+def test_a_near_miss_is_INVALID(tmp_path, mutate, label):
+    """Near misses are rejected, not just wildly different strings.
+
+    A prefix match would accept the truncated cases; a substring match would
+    accept the extended ones. Equality accepts none of them.
+    """
+    revision = mutate(PINNED_REVISION)
+    assert revision != PINNED_REVISION
+    assert _kind(tmp_path, revision, name=label[:18]) == PROVENANCE_INVALID, label
+
+
+@pytest.mark.parametrize(
+    "mutate,label",
+    [
+        (lambda r: r + " ", "trailing space"),
+        (lambda r: " " + r, "leading space"),
+        (lambda r: r + "\n", "trailing newline"),
+        (lambda r: r + "\t", "trailing tab"),
+        (lambda r: r.upper(), "uppercase"),
+        (lambda r: r[:8].upper() + r[8:], "first eight characters uppercased"),
+        (lambda r: r.replace("a", "A"), "some characters uppercased"),
+    ],
+)
+def test_whitespace_and_case_variants_are_INVALID(tmp_path, mutate, label):
+    """The comparison is exact: not stripped, not case-folded, not normalised.
+
+    A run whose manifest recorded a differently-cased or space-padded hash did
+    not record the pinned string, and this must not be papered over — the same
+    zero-tolerance discipline the clean audit applies to its identity fields.
+    """
+    revision = mutate(PINNED_REVISION)
+    assert revision != PINNED_REVISION
+    assert revision.strip().lower() == PINNED_REVISION.lower() or label.startswith("some")
+    assert _kind(tmp_path, revision, name=label[:18]) == PROVENANCE_INVALID, label
+
+
+def test_a_mock_run_is_unaffected_by_the_revision_pin(tmp_path):
+    """The pin governs REAL only; a declared mock still resolves to MOCK."""
+    assert _kind(tmp_path, "mock-revision", mock=True, name="m1") == PROVENANCE_MOCK
+    # ...but a mock claiming the pinned checkpoint is contradictory.
+    assert _kind(tmp_path, PINNED_REVISION, mock=True, name="m2") == PROVENANCE_INVALID
+
+
+def test_omitting_the_expected_revision_cannot_yield_REAL(tmp_path):
+    """A caller that forgets to pass the pin must not get a free pass."""
+    verdict = assess_provenance(_with_revision(tmp_path, PINNED_REVISION, name="nopin"))
+    assert verdict.kind == PROVENANCE_INVALID
+    assert any("no expected model revision was supplied" in r for r in verdict.reasons)
+
+
+def test_the_caller_reads_the_pin_from_the_effective_config(tmp_path, config):
+    """analyse_etth2 must source the pin from pilot_config, not a local copy."""
+    import copy
+
+    etth2 = yaml.safe_load(
+        (REPO_ROOT / "configs" / "etth2_config.yaml").read_text(encoding="utf-8"))
+    gap = yaml.safe_load(
+        (REPO_ROOT / "configs" / "trailing_gap_config.yaml").read_text(encoding="utf-8"))
+    run = _with_revision(tmp_path, PINNED_REVISION, name="cfg")
+
+    # Move the pin in the config; the same run must stop being REAL.
+    moved = copy.deepcopy(config)
+    moved["model"]["revision"] = "0" * 40
+    with pytest.raises(InvalidProvenance) as excinfo:
+        analyse_etth2(run, etth2_config=etth2, pilot_config=moved, gap_config=gap,
+                      out_dir=tmp_path / "out_moved")
+    assert "not the pinned revision" in str(excinfo.value)
+    assert not (tmp_path / "out_moved").exists()
+
+
+def test_allow_mock_analysis_does_not_bypass_a_wrong_revision(tmp_path, config):
+    """A wrong revision is INVALID_PROVENANCE, and that flag never reaches it."""
+    etth2 = yaml.safe_load(
+        (REPO_ROOT / "configs" / "etth2_config.yaml").read_text(encoding="utf-8"))
+    gap = yaml.safe_load(
+        (REPO_ROOT / "configs" / "trailing_gap_config.yaml").read_text(encoding="utf-8"))
+    run = _with_revision(tmp_path, "deadbeef", name="bypass")
+    for allow in (False, True):
+        with pytest.raises(InvalidProvenance) as excinfo:
+            analyse_etth2(
+                run, etth2_config=etth2, pilot_config=config, gap_config=gap,
+                out_dir=tmp_path / f"o{int(allow)}", allow_mock_analysis=allow,
+            )
+        assert "does NOT bypass this" in str(excinfo.value)
+        assert not (tmp_path / f"o{int(allow)}").exists()
