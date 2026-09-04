@@ -64,10 +64,21 @@ mkdir -p handoff
 ## 2. Fetch and validate ETTh2 — HARD STOP on native missingness
 
 ```bash
-.venv/bin/python data/fetch_etth2.py \
-  --config configs/etth2_config.yaml 2>&1 | tee handoff/01_fetch_etth2.txt
-echo "exit=$?"
+# `| tee` makes $? the status of TEE, which is 0 even when python failed.
+# PIPESTATUS[0] is python's own status; the subshell exits on it, so the
+# block's status is the command's. The subshell is the FINAL thing here:
+# do not append an `echo` after it, or its 0 would mask the failure.
+(
+  .venv/bin/python data/fetch_etth2.py \
+    --config configs/etth2_config.yaml 2>&1 | tee handoff/01_fetch_etth2.txt
+  status=${PIPESTATUS[0]}
+  echo "fetch_etth2 exit status: $status"
+  exit "$status"
+)
 ```
+
+Read the status with `echo $?` **as a separate command**. A non-zero
+status is a stop.
 
 Expected, and each is asserted rather than eyeballed:
 
@@ -92,8 +103,20 @@ DERIVED origin count         178
 ## 3. Full test suite, including the real-model tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -v 2>&1 | tee handoff/02_tests.txt
+# `| tee` makes $? the status of TEE, which is 0 even when python failed.
+# PIPESTATUS[0] is python's own status; the subshell exits on it, so the
+# block's status is the command's. The subshell is the FINAL thing here:
+# do not append an `echo` after it, or its 0 would mask the failure.
+(
+  .venv/bin/python -m pytest tests/ -v 2>&1 | tee handoff/02_tests.txt
+  status=${PIPESTATUS[0]}
+  echo "pytest exit status: $status"
+  exit "$status"
+)
 ```
+
+Read the status with `echo $?` **as a separate command**. A non-zero
+status is a stop.
 
 **All tests must pass here**, including the three `requires_model` tests that
 could not run in the implementation environment (its network policy denied
@@ -157,9 +180,21 @@ separate command**.
 ### 4.1 `clean_reference` — all 178 origins, clean only, QC ONLY
 
 ```bash
-.venv/bin/python experiments/run_etth2.py \
-  --phase clean-reference 2>&1 | tee handoff/03_clean_reference.txt
+# `| tee` makes $? the status of TEE, which is 0 even when python failed.
+# PIPESTATUS[0] is python's own status; the subshell exits on it, so the
+# block's status is the command's. The subshell is the FINAL thing here:
+# do not append an `echo` after it, or its 0 would mask the failure.
+(
+  .venv/bin/python experiments/run_etth2.py \
+    --phase clean-reference 2>&1 | tee handoff/03_clean_reference.txt
+  status=${PIPESTATUS[0]}
+  echo "clean-reference exit status: $status"
+  exit "$status"
+)
 ```
+
+Read the status with `echo $?` **as a separate command**. A non-zero
+status is a stop.
 
 Expect **178 rows**, all `kind == clean`, zero failures.
 
@@ -174,9 +209,21 @@ Expect **178 rows**, all `kind == clean`, zero failures.
 **Start a new shell, or at minimum a new Python process.** This is the control.
 
 ```bash
-.venv/bin/python experiments/run_etth2.py \
-  --phase formal-clean 2>&1 | tee handoff/04_formal_clean.txt
+# `| tee` makes $? the status of TEE, which is 0 even when python failed.
+# PIPESTATUS[0] is python's own status; the subshell exits on it, so the
+# block's status is the command's. The subshell is the FINAL thing here:
+# do not append an `echo` after it, or its 0 would mask the failure.
+(
+  .venv/bin/python experiments/run_etth2.py \
+    --phase formal-clean 2>&1 | tee handoff/04_formal_clean.txt
+  status=${PIPESTATUS[0]}
+  echo "formal-clean exit status: $status"
+  exit "$status"
+)
 ```
+
+Read the status with `echo $?` **as a separate command**. A non-zero
+status is a stop.
 
 Expect **178 rows**, all `kind == clean`, zero failures.
 
@@ -185,10 +232,21 @@ Expect **178 rows**, all `kind == clean`, zero failures.
 ## 5. Clean-reference exact audit — HARD STOP
 
 ```bash
-.venv/bin/python experiments/run_etth2.py \
-  --phase audit 2>&1 | tee handoff/05_clean_audit.txt
-echo "exit=$?"
+# `| tee` makes $? the status of TEE, which is 0 even when python failed.
+# PIPESTATUS[0] is python's own status; the subshell exits on it, so the
+# block's status is the command's. The subshell is the FINAL thing here:
+# do not append an `echo` after it, or its 0 would mask the failure.
+(
+  .venv/bin/python experiments/run_etth2.py \
+    --phase audit 2>&1 | tee handoff/05_clean_audit.txt
+  status=${PIPESTATUS[0]}
+  echo "audit exit status: $status"
+  exit "$status"
+)
 ```
+
+Read the status with `echo $?` **as a separate command**. A non-zero
+status is a stop.
 
 Every one of these must match **exactly**, with **no tolerance of any kind**:
 
@@ -218,9 +276,21 @@ different weights.
 ## 6. Only if step 5 passed exactly — the remaining forecasts
 
 ```bash
-.venv/bin/python experiments/run_etth2.py \
-  --phase formal-full 2>&1 | tee handoff/06_formal_full.txt
+# `| tee` makes $? the status of TEE, which is 0 even when python failed.
+# PIPESTATUS[0] is python's own status; the subshell exits on it, so the
+# block's status is the command's. The subshell is the FINAL thing here:
+# do not append an `echo` after it, or its 0 would mask the failure.
+(
+  .venv/bin/python experiments/run_etth2.py \
+    --phase formal-full 2>&1 | tee handoff/06_formal_full.txt
+  status=${PIPESTATUS[0]}
+  echo "formal-full exit status: $status"
+  exit "$status"
+)
 ```
+
+Read the status with `echo $?` **as a separate command**. A non-zero
+status is a stop.
 
 The 178 clean cells are already written and are skipped at origin × condition
 granularity; this pass produces the remaining **2,136** corrupted-condition
@@ -251,8 +321,20 @@ guard.
 ## 7. Analysis
 
 ```bash
-.venv/bin/python experiments/analyze_etth2.py 2>&1 | tee handoff/07_analysis.txt
+# `| tee` makes $? the status of TEE, which is 0 even when python failed.
+# PIPESTATUS[0] is python's own status; the subshell exits on it, so the
+# block's status is the command's. The subshell is the FINAL thing here:
+# do not append an `echo` after it, or its 0 would mask the failure.
+(
+  .venv/bin/python experiments/analyze_etth2.py 2>&1 | tee handoff/07_analysis.txt
+  status=${PIPESTATUS[0]}
+  echo "analyze_etth2 exit status: $status"
+  exit "$status"
+)
 ```
+
+Read the status with `echo $?` **as a separate command**. A non-zero
+status is a stop.
 
 Writes into `results/etth2_replication_v1/formal/analysis/`:
 

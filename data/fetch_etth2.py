@@ -178,6 +178,74 @@ def load_series(config: dict[str, Any]) -> tuple[np.ndarray, pd.DatetimeIndex, D
     return values, stamps, validation
 
 
+class DatasetContractError(RuntimeError):
+    """A recorded dataset fact does not match the file on disk."""
+
+
+def check_dataset_contract(
+    validation: DatasetValidation, dataset_config: dict[str, Any], design: dict[str, Any]
+) -> list[str]:
+    """Every recorded fact, checked against the file. Returns the violations.
+
+    Collected rather than raised one at a time so a single run reports every
+    problem, and returned rather than printed so ``main`` can make the exit code
+    depend on them. A CLI that printed "VALIDATION NOTES" and exited 0 would be
+    worse than silent: a wrapper script checking ``$?`` would conclude the
+    dataset was fine.
+    """
+    problems: list[str] = []
+
+    expected_sha = dataset_config.get("expected_sha256")
+    if expected_sha and validation.sha256 != expected_sha:
+        problems.append(
+            f"sha256 mismatch: file is {validation.sha256}, config pins {expected_sha}"
+        )
+    if validation.n_rows != int(dataset_config["expected_rows"]):
+        problems.append(
+            f"row count {validation.n_rows} != recorded {dataset_config['expected_rows']}"
+        )
+    if validation.n_gaps_in_hourly_grid:
+        problems.append(
+            f"{validation.n_gaps_in_hourly_grid} gap(s) in the hourly grid"
+        )
+    if not validation.freq_matches_expected:
+        problems.append(
+            f"inferred frequency {validation.inferred_freq!r} != expected "
+            f"{validation.expected_freq!r}"
+        )
+    if not validation.timestamps_monotonic_increasing:
+        problems.append("timestamps are not monotonically increasing")
+    if not validation.timestamps_unique:
+        problems.append("timestamps are not unique")
+    for key, actual in (
+        ("timestamp_first", validation.timestamp_first),
+        ("timestamp_last", validation.timestamp_last),
+    ):
+        recorded = dataset_config.get(key)
+        if recorded and str(recorded) != str(actual):
+            problems.append(f"{key} {actual!r} != recorded {recorded!r}")
+    # Native missingness normally raises before this point; kept here so the
+    # contract check is complete on its own terms rather than relying on caller
+    # ordering.
+    if validation.native_missing_in_target:
+        problems.append(
+            f"{validation.native_missing_in_target} native missing value(s) in "
+            f"{validation.target_column}"
+        )
+
+    derived = derive_origin_count(
+        n_rows=validation.n_rows,
+        context_length=int(design["context_length"]),
+        horizon=int(design["horizon"]),
+        stride=int(design["stride"]),
+    )
+    if derived != int(design["expected_origins"]):
+        problems.append(
+            f"derived origin count {derived} != recorded {design['expected_origins']}"
+        )
+    return problems
+
+
 def main() -> int:
     import yaml
 
@@ -198,12 +266,25 @@ def main() -> int:
     ds, design = config["dataset"], config["design"]
 
     csv_path = REPO_ROOT / ds["local_path"]
-    download(ds["source_url"], csv_path, force=args.force_download)
+    try:
+        download(ds["source_url"], csv_path, force=args.force_download)
+    except Exception as exc:                       # network, permissions, 404
+        print(f"FAILED to acquire {csv_path}: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        return 1
 
-    # The hard stop is inside validate_etth2 and runs here, before anything else
-    # reports success. A non-zero exit with the NativeMissingnessError message is
-    # the intended behaviour, not a crash to be worked around.
-    validation = validate_etth2(csv_path, ds)
+    # The hard stop lives inside validate_etth2 and fires here, before anything
+    # reports success. A non-zero exit carrying its message is the intended
+    # behaviour, not a crash to be worked around.
+    try:
+        validation = validate_etth2(csv_path, ds)
+    except NativeMissingnessError as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        return 2
+    except (ValueError, OSError) as exc:
+        print(f"VALIDATION FAILED: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        return 1
 
     metadata_path = REPO_ROOT / ds["metadata_path"]
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,16 +311,18 @@ def main() -> int:
         config_path.write_text(text, encoding="utf-8")
         print(f"Wrote expected_sha256={validation.sha256} into {args.config}")
 
-    problems: list[str] = []
-    if validation.n_rows != int(ds["expected_rows"]):
-        problems.append(f"row count {validation.n_rows} != {ds['expected_rows']}")
-    if validation.n_gaps_in_hourly_grid:
-        problems.append(f"{validation.n_gaps_in_hourly_grid} gaps in the hourly grid")
-    if derived != int(design["expected_origins"]):
-        problems.append(f"derived origins {derived} != {design['expected_origins']}")
+    problems = check_dataset_contract(validation, ds, design)
     if problems:
-        print("\nVALIDATION NOTES: " + "; ".join(problems))
+        print("\nCONTRACT VIOLATION(S) — this is a HARD STOP:", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        print(
+            "\nDo not proceed. The file on disk is not the dataset this study "
+            "recorded, and no forecast may be produced against it.",
+            file=sys.stderr, flush=True,
+        )
         return 1
+
     print(
         f"\nVALIDATION: clean — recorded length, no grid gaps, "
         f"ZERO native missing values in {validation.target_column}, "
@@ -250,6 +333,8 @@ def main() -> int:
 
 __all__ = [
     "DATASET_NAME",
+    "DatasetContractError",
+    "check_dataset_contract",
     "NativeMissingnessError",
     "OriginCountError",
     "assert_no_native_missingness",

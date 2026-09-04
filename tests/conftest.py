@@ -59,3 +59,11 @@ def real_series(config):
         pytest.skip("ETTh1 not fetched; run data/fetch_etth1.py")
     values, stamps, validation = load_series(config)
     return values, stamps, validation
+
+
+@pytest.fixture(scope="session")
+def gap_config_fixture() -> dict:
+    """The frozen trailing-gap config, for tests that drive the shared runner."""
+    return yaml.safe_load(
+        (REPO_ROOT / "configs" / "trailing_gap_config.yaml").read_text(encoding="utf-8")
+    )

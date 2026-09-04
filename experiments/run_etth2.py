@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -58,18 +59,37 @@ if str(REPO_ROOT) not in sys.path:
 from data.fetch_etth2 import load_series as load_etth2  # noqa: E402
 from experiments.clean_reference_audit import (  # noqa: E402
     CleanReferenceAuditFailure,
+    assert_clean_conditions_only,
     audit_clean_reference,
+    verify_gate_still_binds,
 )
-from experiments.run_trailing_gap import run_trailing_gap  # noqa: E402
+from experiments.run_trailing_gap import (  # noqa: E402
+    run_trailing_gap,
+    write_run_summary,
+)
 from model.chronos2_runner import Forecaster, MockForecaster  # noqa: E402
 
 GATE_FILENAME = "clean_reference_audit.json"
+
+# The commit the Research Lead signed the frozen design off against. Recorded in
+# every ETTh2 manifest so a run can be traced to the design it was authorised
+# under, not merely to the tree it executed from.
+DESIGN_SIGNOFF_COMMIT = "5b62949"
+EXECUTION_ENTRYPOINT = "experiments/run_etth2.py"
+UNAVAILABLE = "unavailable"
 
 PHASE_CLEAN_REFERENCE = "clean-reference"
 PHASE_FORMAL_CLEAN = "formal-clean"
 PHASE_AUDIT = "audit"
 PHASE_FORMAL_FULL = "formal-full"
 PHASES = (PHASE_CLEAN_REFERENCE, PHASE_FORMAL_CLEAN, PHASE_AUDIT, PHASE_FORMAL_FULL)
+
+# One sentence, defined once, stamped on every artifact a mock run produces.
+MOCK_NOT_A_FINDING = (
+    "MOCK FORECASTER. This is a pipeline exercise. The numbers are arbitrary, "
+    "they are NOT a Chronos-2 result, and they are NOT an ETTh2 finding. "
+    "Nothing here may be reported, cited, or compared against ETTh1."
+)
 
 # Keys the ETTh2 config contributes to the effective config. Everything else
 # comes from the pilot config untouched, so a shared constant cannot be
@@ -149,6 +169,22 @@ def native_missingness_gate(effective_config: dict[str, Any]) -> dict[str, Any]:
 # The audit gate
 # --------------------------------------------------------------------------- #
 
+def _manifest_revision(formal_dir: Path) -> str:
+    """The revision the formal run's clean pass actually loaded.
+
+    Read from its own manifest rather than from the config, so the anchor is
+    what ran, not what was intended to run.
+    """
+    manifest_path = Path(formal_dir) / "run_manifest.json"
+    if not manifest_path.exists():
+        raise ReplicationGateError(
+            f"HARD STOP: {manifest_path} is absent. The formal run's clean pass "
+            f"has not been run in this directory, so there is nothing to audit."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return str(manifest["model_contract"]["revision"])
+
+
 def write_gate(formal_dir: Path, report, *, dataset_sha256: str, model_revision: str) -> Path:
     """Record a PASSING audit, bound to the data and weights it was run on.
 
@@ -223,6 +259,72 @@ def assert_gate_matches_model(
 # Phases
 # --------------------------------------------------------------------------- #
 
+def git_provenance() -> dict[str, Any]:
+    """The commit and dirty status AT RUN TIME, read from git, never assumed.
+
+    A manifest that recorded only the intended commit would be silent about a
+    run executed from a modified tree, which is exactly the case a reviewer most
+    needs to see. Failures are recorded rather than swallowed: an unavailable
+    git is a fact about the run, not a reason to omit the field.
+    """
+    def _git(*args: str, strip: bool = True) -> str:
+        try:
+            out = subprocess.run(
+                ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"{UNAVAILABLE}: {type(exc).__name__}"
+        if out.returncode != 0:
+            return f"{UNAVAILABLE}: git {' '.join(args)} exited {out.returncode}"
+        # porcelain lines are position-significant: their first two characters
+        # are the status code and the third is a separator, so a leading space
+        # is data. Stripping it would shift every path on the first line.
+        return out.stdout.strip() if strip else out.stdout.rstrip("\n")
+
+    commit = _git("rev-parse", "HEAD")
+    porcelain = _git("status", "--porcelain", strip=False)
+    available = not porcelain.startswith(UNAVAILABLE)
+    return {
+        "git_commit": commit,
+        "git_dirty": bool(porcelain) if available else None,
+        # Recorded VERBATIM, status codes included. Slicing off a fixed prefix
+        # would mangle renames ("R  old -> new") and, as this code originally
+        # did, drop a character whenever the output had been stripped.
+        "git_status_porcelain": (
+            porcelain.splitlines()[:50] if available else porcelain
+        ),
+    }
+
+
+def build_run_metadata(
+    etth2_config: dict[str, Any], *, phase: str, mock: bool
+) -> dict[str, Any]:
+    """ETTh2's OWN manifest identity. Explicitly overridden, never inherited.
+
+    ``run_trailing_gap`` defaults ``experiment`` and ``preregistration`` to
+    ``trailing_gap_config.meta``, which names the ETTh1 experiment. Letting that
+    default through would put ETTh1's identity on an ETTh2 manifest — wrong in
+    the single file a reviewer uses to establish what was executed. So both are
+    set here, from the ETTh2 config, and the runner raises if any other manifest
+    key is collided with.
+    """
+    return {
+        "experiment": etth2_config["meta"]["name"],
+        "preregistration": etth2_config["meta"]["preregistration"],
+        "replication_rule_version": etth2_config["replication_rule"]["rule_version"],
+        "design_signoff_commit": DESIGN_SIGNOFF_COMMIT,
+        "execution_entrypoint": EXECUTION_ENTRYPOINT,
+        "phase": phase,
+        "mock_model": bool(mock),
+        "mock_model_note": (
+            MOCK_NOT_A_FINDING if mock
+            else "Real forecaster. Subject to the runbook's preconditions."
+        ),
+        "etth2_config": etth2_config,
+        **git_provenance(),
+    }
+
+
 def _forecaster(config: dict[str, Any], *, mock: bool) -> Forecaster:
     if mock:
         print(
@@ -262,22 +364,18 @@ def run_phase(
     design = effective["design"]
 
     if phase == PHASE_AUDIT:
+        revision_for_anchor = _manifest_revision(formal_dir)
         report = audit_clean_reference(
             formal_dir, reference_dir,
             expected_origins=int(design["expected_origins"]),
             expected_horizon=int(design["horizon"]),
+            # Anchor both sides to what is loaded NOW, not merely to each other.
+            dataset_sha256=dataset_facts["dataset_sha256"],
+            model_revision=revision_for_anchor,
         )
         # The revision the formal run ACTUALLY loaded, read from its own
         # manifest rather than from the config, so the gate records what ran.
-        manifest_path = formal_dir / "run_manifest.json"
-        if not manifest_path.exists():
-            raise ReplicationGateError(
-                f"HARD STOP: {manifest_path} is absent. The formal run's clean "
-                f"pass has not been run in this directory, so there is nothing "
-                f"to audit."
-            )
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        revision = manifest["model_contract"]["revision"]
+        revision = revision_for_anchor
         if not report.passed:
             raise CleanReferenceAuditFailure(
                 "HARD STOP: the clean_reference run and the formal run's clean "
@@ -305,6 +403,16 @@ def run_phase(
         gate = require_gate(
             formal_dir, dataset_sha256=dataset_facts["dataset_sha256"]
         )
+        # Then the time-of-check/time-of-use re-check: the gate is a statement
+        # about specific bytes, and those bytes must still be the ones on disk.
+        # A gate that was valid when written does not authorise proceeding if the
+        # clean data has changed since.
+        verify_gate_still_binds(
+            formal_dir, reference_dir, gate.get("clean_artifact_digests", {})
+        )
+        # And the clean side must still be clean-only: corrupted rows appearing
+        # between the audit and now would mean this phase has already started.
+        assert_clean_conditions_only(reference_dir, "reference")
 
     forecaster = _forecaster(effective, mock=mock)
     if phase == PHASE_FORMAL_FULL:
@@ -312,13 +420,31 @@ def run_phase(
         assert_gate_matches_model(
             formal_dir, gate, model_revision=str(forecaster.contract.revision)
         )
+    metadata = build_run_metadata(etth2_config, phase=phase, mock=mock)
     summary = run_trailing_gap(
         config=effective, gap_config=gap_config, forecaster=forecaster,
         run_dir=run_dir, limit_origins=limit_origins, only_conditions=only,
+        run_metadata=metadata,
     )
+    # The runner writes run_summary.json before returning; the wrapper knows
+    # things the runner does not (phase, mock status, dataset facts, provenance).
+    # Enrich and persist ATOMICALLY, so a crash mid-write cannot leave a summary
+    # that is half the runner's and half the wrapper's.
     summary["phase"] = phase
     summary["dataset_facts"] = dataset_facts
     summary["mock_model"] = bool(mock)
+    if mock:
+        summary["scientifically_valid"] = False
+        summary["authoritative_result"] = False
+        summary["mock_model_note"] = MOCK_NOT_A_FINDING
+    summary["experiment"] = metadata["experiment"]
+    summary["preregistration"] = metadata["preregistration"]
+    summary["replication_rule_version"] = metadata["replication_rule_version"]
+    summary["design_signoff_commit"] = metadata["design_signoff_commit"]
+    summary["execution_entrypoint"] = metadata["execution_entrypoint"]
+    summary["git_commit"] = metadata["git_commit"]
+    summary["git_dirty"] = metadata["git_dirty"]
+    write_run_summary(run_dir, summary)
     return summary
 
 

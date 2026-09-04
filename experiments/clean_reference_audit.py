@@ -27,6 +27,7 @@ makes that a checked property of a run directory rather than a convention.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import dataclass, field
@@ -47,6 +48,10 @@ from scripts.audit_clean_predictions import (  # noqa: E402
 
 CLEAN_CONDITION_ID = "clean"
 
+# Columns the audit compares. Their ABSENCE must be a failure, never a quietly
+# skipped check — the shared audit skips a column it cannot find on both sides.
+REQUIRED_PROVENANCE_COLUMNS = ("dataset_sha256", "model_revision")
+
 
 class CleanReferenceAuditFailure(RuntimeError):
     """The two runs disagree. Always a hard stop; never downgraded to a warning."""
@@ -61,6 +66,9 @@ class CleanReferenceReport:
     expected_origins: int = 0
     expected_horizon: int = 0
     details: dict[str, Any] = field(default_factory=dict)
+    # sha256 of the exact clean-artifact bytes this audit read, per side. The
+    # gate carries these so formal-full can prove the files have not moved.
+    clean_artifact_digests: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +81,7 @@ class CleanReferenceReport:
             "n_failures": len(self.failures),
             "failures": self.failures,
             "details": self.details,
+            "clean_artifact_digests": self.clean_artifact_digests,
             "tolerance": "none",
             "note": (
                 "clean_reference is QC-only and is EXCLUDED from the statistical "
@@ -104,6 +113,89 @@ def _size_failures(
             f"{label}: steps per origin {per_origin}, expected [{expected_horizon}]"
         )
     return failures
+
+
+def clean_artifact_digest(run_dir: Path) -> dict[str, str]:
+    """sha256 of the exact BYTES of the clean artifacts the audit read.
+
+    The gate records these. At formal-full startup they are recomputed and
+    compared, which closes a time-of-check-to-time-of-use gap: a gate that was
+    valid when written must not authorise proceeding if the underlying clean
+    files have changed since. Binding to file bytes rather than to a summary
+    means any edit — a re-run, a hand-patched cell, a truncation — invalidates it.
+    """
+    digests: dict[str, str] = {}
+    for name in ("predictions_long.csv", "window_results.csv"):
+        path = Path(run_dir) / name
+        if not path.exists():
+            raise CleanReferenceAuditFailure(f"{path} is absent; cannot digest")
+        digests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digests
+
+
+def assert_distinct_directories(formal_dir: Path, reference_dir: Path) -> None:
+    """The two runs must be two runs. Refuse if they resolve to one directory.
+
+    A control that compared a directory against itself would pass every check
+    while proving nothing at all — the worst possible failure mode, because it
+    looks like success. Resolved paths, so a symlink or a ``.`` cannot disguise
+    the collision.
+    """
+    formal, reference = Path(formal_dir).resolve(), Path(reference_dir).resolve()
+    if formal == reference:
+        raise CleanReferenceAuditFailure(
+            f"HARD STOP: the formal run and clean_reference resolve to the SAME "
+            f"path ({formal}). The control compares two INDEPENDENTLY GENERATED "
+            f"runs; comparing a directory with itself passes every check and "
+            f"proves nothing."
+        )
+
+
+def assert_provenance_columns(run_dir: Path, label: str) -> pd.DataFrame:
+    """window_results.csv must CARRY the provenance columns, not merely maybe.
+
+    The shared audit skips a comparison whose column is absent on either side. A
+    missing column would therefore read as a silently passed check. Requiring
+    them here converts that into a failure.
+    """
+    path = Path(run_dir) / "window_results.csv"
+    if not path.exists():
+        raise CleanReferenceAuditFailure(f"{path} is absent")
+    frame = pd.read_csv(path)
+    missing = [c for c in REQUIRED_PROVENANCE_COLUMNS if c not in frame.columns]
+    if missing:
+        raise CleanReferenceAuditFailure(
+            f"HARD STOP: {label} run at {run_dir} is missing provenance column(s) "
+            f"{missing}. These are compared by the audit; absent, the comparison "
+            f"would be skipped and reported as passing."
+        )
+    return frame
+
+
+def assert_row_provenance_matches(
+    run_dir: Path, label: str, *, dataset_sha256: str, model_revision: str
+) -> None:
+    """Row-level provenance must match the CURRENT dataset and model, not just
+    the other side.
+
+    Two runs can agree with each other and both be wrong — produced from a stale
+    checkout, or against a dataset that has since been replaced. Anchoring each
+    side to the checksum loaded right now, and to the revision the manifest says
+    was loaded, makes agreement-with-each-other insufficient on its own.
+    """
+    frame = assert_provenance_columns(run_dir, label)
+    for column, expected in (
+        ("dataset_sha256", dataset_sha256),
+        ("model_revision", model_revision),
+    ):
+        values = sorted(set(frame[column].astype(str)))
+        if values != [str(expected)]:
+            raise CleanReferenceAuditFailure(
+                f"HARD STOP: {label} run at {run_dir} carries {column}={values}, "
+                f"but this run has {column}={str(expected)!r}. The two runs "
+                f"matching each other is not enough; both must match what is "
+                f"loaded now."
+            )
 
 
 def _clean_rows(run_dir: Path) -> pd.DataFrame:
@@ -138,15 +230,51 @@ def assert_reference_excluded_from_analysis(reference_dir: Path) -> None:
 
 
 def audit_clean_reference(
-    formal_dir: Path, reference_dir: Path, *, expected_origins: int, expected_horizon: int
+    formal_dir: Path, reference_dir: Path, *, expected_origins: int, expected_horizon: int,
+    dataset_sha256: str | None = None, model_revision: str | None = None,
 ) -> CleanReferenceReport:
-    """Every shared check, plus ETTh2's own cardinality. Returns; never raises on mismatch."""
+    """Every shared check, plus ETTh2's own cardinality and provenance anchoring.
+
+    ``dataset_sha256`` / ``model_revision`` anchor both sides to what is loaded
+    NOW. They are optional only so the audit can be exercised on synthetic
+    fixtures; the runner always supplies them, and a test asserts it does.
+    """
     formal_dir, reference_dir = Path(formal_dir), Path(reference_dir)
     report = CleanReferenceReport(
         passed=False,
         expected_origins=int(expected_origins),
         expected_horizon=int(expected_horizon),
     )
+
+    # Misconfiguration checks come first: they invalidate everything downstream.
+    for check in (
+        lambda: assert_distinct_directories(formal_dir, reference_dir),
+        # Both sides must hold clean conditions ONLY, before any comparison. A
+        # formal directory that already contains corrupted conditions means the
+        # audit is running too late to gate anything.
+        lambda: assert_clean_conditions_only(formal_dir, "formal"),
+        lambda: assert_clean_conditions_only(reference_dir, "reference"),
+        lambda: assert_provenance_columns(formal_dir, "formal"),
+        lambda: assert_provenance_columns(reference_dir, "reference"),
+    ):
+        try:
+            check()
+        except CleanReferenceAuditFailure as exc:
+            report.failures.append(str(exc))
+    if report.failures:
+        return report
+
+    if dataset_sha256 is not None and model_revision is not None:
+        for run_dir, label in ((formal_dir, "formal"), (reference_dir, "reference")):
+            try:
+                assert_row_provenance_matches(
+                    run_dir, label,
+                    dataset_sha256=dataset_sha256, model_revision=model_revision,
+                )
+            except CleanReferenceAuditFailure as exc:
+                report.failures.append(str(exc))
+        report.details["anchored_dataset_sha256"] = dataset_sha256
+        report.details["anchored_model_revision"] = model_revision
 
     # The shared audit owns keys, timestamps, ground truth, per-origin target
     # digests, dataset checksum, model revision and the canonical float32
@@ -172,8 +300,66 @@ def audit_clean_reference(
     except CleanReferenceAuditFailure as exc:
         report.failures.append(str(exc))
 
+    # Bind the gate to the exact bytes audited, for the TOCTOU re-check.
+    try:
+        report.clean_artifact_digests = {
+            "formal": clean_artifact_digest(formal_dir),
+            "reference": clean_artifact_digest(reference_dir),
+        }
+    except CleanReferenceAuditFailure as exc:
+        report.failures.append(str(exc))
+
     report.passed = not report.failures
     return report
+
+
+def assert_clean_conditions_only(run_dir: Path, label: str) -> None:
+    """A directory holding any non-clean condition is not a clean pass."""
+    path = Path(run_dir) / "window_results.csv"
+    if not path.exists():
+        raise CleanReferenceAuditFailure(f"{path} is absent")
+    kinds = sorted(set(pd.read_csv(path, usecols=["kind"])["kind"].astype(str)))
+    if kinds != [CLEAN_CONDITION_ID]:
+        raise CleanReferenceAuditFailure(
+            f"HARD STOP: the {label} run at {run_dir} contains non-clean "
+            f"condition(s) {kinds}. The audit gates the corrupted-condition "
+            f"phase, so it must run while both sides hold clean forecasts only; "
+            f"corrupted rows already present mean it is running too late to gate "
+            f"anything."
+        )
+
+
+def verify_gate_still_binds(
+    formal_dir: Path, reference_dir: Path, recorded: dict[str, dict[str, str]]
+) -> None:
+    """TOCTOU re-check: the clean artifacts must be the ones the gate audited.
+
+    A gate is a statement about specific bytes. If those bytes changed after it
+    was written — a re-run, a hand edit, a partially overwritten file — the gate
+    no longer says anything about what is on disk now, and must not authorise
+    proceeding.
+    """
+    if not recorded:
+        raise CleanReferenceAuditFailure(
+            "HARD STOP: the gate records no clean-artifact digests, so it cannot "
+            "be bound to the files on disk. Re-run the audit."
+        )
+    for label, run_dir in (("formal", formal_dir), ("reference", reference_dir)):
+        expected = recorded.get(label)
+        if not expected:
+            raise CleanReferenceAuditFailure(
+                f"HARD STOP: the gate records no digests for the {label} run."
+            )
+        actual = clean_artifact_digest(run_dir)
+        for name, digest in expected.items():
+            if actual.get(name) != digest:
+                raise CleanReferenceAuditFailure(
+                    f"HARD STOP: {label}/{name} has CHANGED since the audit "
+                    f"passed (gate recorded {digest}, file is now "
+                    f"{actual.get(name)}). The gate no longer describes the data "
+                    f"on disk. Re-run the clean passes and the audit; do not "
+                    f"proceed on a stale authorisation."
+                )
 
 
 def require_clean_reference_match(

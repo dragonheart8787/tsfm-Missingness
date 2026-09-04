@@ -319,3 +319,125 @@ def test_the_runner_delegates_to_the_etth1_execution_path(etth2_present):
     # It orchestrates; it does not re-implement the per-origin loop.
     assert "forecast_median" not in source
     assert "compute_metrics" not in source
+
+
+# --------------------------------------------------------------------------- #
+# Manifest and summary provenance — asserted on the FILES, not returned dicts
+# --------------------------------------------------------------------------- #
+
+def test_run_metadata_is_explicitly_overridden_not_inherited(etth2_config):
+    """ETTh1's experiment identity must not default through into ETTh2."""
+    from experiments.run_etth2 import build_run_metadata
+
+    gap = yaml.safe_load(
+        (REPO_ROOT / "configs" / "trailing_gap_config.yaml").read_text(encoding="utf-8")
+    )
+    metadata = build_run_metadata(etth2_config, phase=PHASE_FORMAL_CLEAN, mock=True)
+    assert metadata["experiment"] == "etth2-trailing-gap-replication-v1"
+    assert metadata["experiment"] != gap["meta"]["name"]
+    assert metadata["preregistration"] == "docs/preregistration_etth2_replication_v1.md"
+    assert metadata["preregistration"] != gap["meta"]["preregistration"]
+
+
+def test_the_shared_runner_refuses_metadata_that_would_overwrite_a_manifest_key(
+    etth2_present, tmp_path, config
+):
+    """Only experiment and preregistration are overridable; a collision is a bug."""
+    from experiments.run_trailing_gap import run_trailing_gap
+    from model.chronos2_runner import MockForecaster
+
+    gap = yaml.safe_load(
+        (REPO_ROOT / "configs" / "trailing_gap_config.yaml").read_text(encoding="utf-8")
+    )
+    with pytest.raises(ValueError, match="may not overwrite manifest key"):
+        run_trailing_gap(
+            config=config, gap_config=gap, forecaster=MockForecaster(),
+            run_dir=tmp_path / "x", limit_origins=1,
+            run_metadata={"model_contract": {"revision": "spoofed"}},
+        )
+
+
+@pytest.mark.parametrize("phase", [PHASE_CLEAN_REFERENCE, PHASE_FORMAL_CLEAN])
+def test_the_manifest_file_on_disk_carries_full_etth2_provenance(
+    etth2_present, tmp_path, etth2_config, config, gap_config, phase
+):
+    """Read the FILE. An in-memory dict proves nothing about what was persisted."""
+    run_phase(
+        phase=phase, etth2_config=etth2_config, pilot_config=config,
+        gap_config=gap_config, mock=True, limit_origins=2,
+        reference_dir=tmp_path / "ref", formal_dir=tmp_path / "formal",
+    )
+    run_dir = tmp_path / ("ref" if phase == PHASE_CLEAN_REFERENCE else "formal")
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["experiment"] == "etth2-trailing-gap-replication-v1"
+    assert manifest["preregistration"] == "docs/preregistration_etth2_replication_v1.md"
+    assert manifest["replication_rule_version"] == "etth2-replication-v1"
+    assert manifest["design_signoff_commit"] == "5b62949"
+    assert manifest["execution_entrypoint"] == "experiments/run_etth2.py"
+    assert manifest["phase"] == phase
+    assert manifest["mock_model"] is True
+    assert "NOT an ETTh2 finding" in manifest["mock_model_note"]
+    # Real git state at run time, not an assumption.
+    assert len(manifest["git_commit"]) == 40
+    assert isinstance(manifest["git_dirty"], bool)
+    assert isinstance(manifest["git_status_porcelain"], list)
+    # The run_id derives from ETTh2's experiment, not ETTh1's.
+    assert manifest["run_id"].startswith("etth2-trailing-gap-replication-v1")
+    assert "trailing-gap-mechanism-v1" not in manifest["run_id"]
+
+
+def test_the_persisted_run_summary_on_disk_carries_the_enrichment(
+    etth2_present, tmp_path, etth2_config, config, gap_config
+):
+    """The wrapper enriches after the runner returns; the FILE must show it."""
+    returned = run_phase(
+        phase=PHASE_CLEAN_REFERENCE, etth2_config=etth2_config, pilot_config=config,
+        gap_config=gap_config, mock=True, limit_origins=2,
+        reference_dir=tmp_path / "ref", formal_dir=tmp_path / "formal",
+    )
+    on_disk = json.loads(
+        (tmp_path / "ref" / "run_summary.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["phase"] == PHASE_CLEAN_REFERENCE
+    assert on_disk["mock_model"] is True
+    assert on_disk["scientifically_valid"] is False
+    assert on_disk["authoritative_result"] is False
+    assert "NOT an ETTh2 finding" in on_disk["mock_model_note"]
+    assert on_disk["experiment"] == "etth2-trailing-gap-replication-v1"
+    assert on_disk["design_signoff_commit"] == "5b62949"
+    assert on_disk["execution_entrypoint"] == "experiments/run_etth2.py"
+    assert on_disk["dataset_facts"]["native_missing_in_target"] == 0
+    assert len(on_disk["git_commit"]) == 40
+    # The file must agree with what the function returned.
+    for key in ("phase", "mock_model", "experiment", "git_commit"):
+        assert on_disk[key] == returned[key], key
+
+
+def test_the_summary_is_written_atomically_leaving_no_temp_file(
+    etth2_present, tmp_path, etth2_config, config, gap_config
+):
+    run_phase(
+        phase=PHASE_CLEAN_REFERENCE, etth2_config=etth2_config, pilot_config=config,
+        gap_config=gap_config, mock=True, limit_origins=2,
+        reference_dir=tmp_path / "ref", formal_dir=tmp_path / "formal",
+    )
+    assert (tmp_path / "ref" / "run_summary.json").exists()
+    assert not list((tmp_path / "ref").glob("*.tmp")), "a temp file survived"
+
+
+def test_the_porcelain_first_line_is_not_mangled():
+    """Regression: stripping the whole porcelain output ate the first path's
+    leading character, because a porcelain line's first two chars are status."""
+    from experiments.run_etth2 import git_provenance
+
+    provenance = git_provenance()
+    if not provenance["git_dirty"]:
+        pytest.skip("clean tree; nothing to check")
+    for line in provenance["git_status_porcelain"]:
+        assert len(line) > 3
+        assert line[2] == " ", repr(line)
+        path = line[3:]
+        assert not path.startswith("/"), repr(line)
+        # A mangled path would have lost its first character.
+        assert (REPO_ROOT / path).exists() or path.endswith("/"), repr(line)

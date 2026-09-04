@@ -39,6 +39,9 @@ from model.chronos2_runner import Forecaster, MockForecaster  # noqa: E402
 from runner.run_pilot import RunPaths, assert_target_integrity, collect_environment  # noqa: E402
 from runner.windows import build_windows  # noqa: E402
 
+# The dataset this entrypoint exists for. Anything else is refused at the CLI.
+THIS_EXPERIMENT_DATASET = "ETTh1"
+
 
 def completed_cells(paths: RunPaths) -> set[tuple[int, str]]:
     """Resume truth, at ORIGIN x CONDITION granularity.
@@ -121,6 +124,66 @@ def _write_checkpoint(
     os.replace(tmp, paths.checkpoint)  # atomic: never a torn checkpoint
 
 
+class NativeMissingnessPolicyViolation(RuntimeError):
+    """The dataset declares a native-missingness hard stop and violates it.
+
+    Raised at the runner's lowest forecasting boundary, so it cannot be bypassed
+    by calling this function directly instead of going through a dataset-specific
+    wrapper.
+    """
+
+
+def enforce_native_missingness_policy(config: dict[str, Any], validation) -> None:
+    """OPT-IN hard stop, keyed on ``dataset.native_missing_is_a_hard_stop``.
+
+    ADDITIVE AND OPT-IN BY DESIGN. A dataset config that does not set the key —
+    ETTh1's, which predates it — takes the same path it always did: this
+    function inspects the flag, finds it absent, and returns without touching
+    anything. ETTh1 behaviour is therefore byte-identical to before the key
+    existed, which ``tests/test_native_missingness_policy.py`` proves against
+    recorded output hashes rather than by inspection.
+
+    For a dataset that DOES set it, the check runs here — after ``load_series``
+    and before ``build_windows`` or any ``forecast_median`` call — because this
+    is the last point common to every route into the matrix. A gate that lived
+    only in a wrapper could be walked around by importing this module and
+    calling ``run_trailing_gap`` directly, which is exactly the hole this closes.
+    """
+    dataset = config.get("dataset", {})
+    if not dataset.get("native_missing_is_a_hard_stop"):
+        return
+    observed = int(getattr(validation, "native_missing_in_target", 0))
+    if observed == 0:
+        return
+    positions = list(getattr(validation, "native_missing_positions_in_target", []))[:20]
+    raise NativeMissingnessPolicyViolation(
+        f"HARD STOP: {dataset.get('name', 'the dataset')}'s target column "
+        f"{dataset.get('target_column', '?')!r} has {observed} native missing "
+        f"value(s), at row index/indices {positions}"
+        f"{' (first 20 shown)' if observed > 20 else ''}, and its config sets "
+        f"dataset.native_missing_is_a_hard_stop.\n"
+        f"\n"
+        f"No window was built and no forecast was requested. Do NOT impute, drop, "
+        f"interpolate, or widen a tolerance: how to handle native missingness is a "
+        f"design decision, and it belongs to the Research Lead."
+    )
+
+
+def write_run_summary(run_dir: Path, summary: dict[str, Any]) -> Path:
+    """Write run_summary.json atomically: temp file, then rename.
+
+    A wrapper enriches this summary after the runner returns and writes it back.
+    A torn summary — half the old content, half the new — would be worse than
+    either, so the rename is what makes it visible, exactly as the checkpoint
+    writer already does.
+    """
+    path = Path(run_dir) / "run_summary.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
 def run_trailing_gap(
     *,
     config: dict[str, Any],
@@ -130,11 +193,22 @@ def run_trailing_gap(
     limit_origins: int | None = None,
     only_conditions: list[str] | None = None,
     run_id: str | None = None,
+    run_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run the matrix. ``only_conditions`` supports the clean-first audit step."""
+    """Run the matrix. ``only_conditions`` supports the clean-first audit step.
+
+    ``run_metadata`` lets a dataset-specific wrapper OVERRIDE the manifest's
+    provenance fields rather than inherit them. Without it the manifest defaults
+    to ``gap_config['meta']``, which names the ETTh1 trailing-gap experiment —
+    correct for that experiment and wrong for anything else, so a wrapper for a
+    different dataset must pass its own identity explicitly.
+    """
     design = config["design"]
     horizon = int(design["horizon"])
     values, timestamps, validation = load_series(config)
+    # Lowest forecasting boundary: after validation, before any window is built
+    # and before any call reaches the forecaster.
+    enforce_native_missingness_policy(config, validation)
     windows = build_windows(values=values, timestamps=timestamps, config=config)
 
     conditions_per_origin = int(gap_config["design"]["expected_conditions_per_origin"])
@@ -143,30 +217,45 @@ def run_trailing_gap(
     done_cells = completed_cells(paths)
     prior_clean_mae = existing_clean_mae(paths)
     prior_digests = existing_target_digests(paths)
+    run_metadata = dict(run_metadata or {})
+    # Identity defaults to the trailing-gap experiment because that is what this
+    # module was written for. A wrapper for a DIFFERENT dataset must override it:
+    # inheriting ETTh1's experiment name into an ETTh2 manifest would misattribute
+    # the run in the one file the reviewer uses to establish what was executed.
+    experiment = run_metadata.pop("experiment", gap_config["meta"]["name"])
+    preregistration = run_metadata.pop(
+        "preregistration", gap_config["meta"]["preregistration"]
+    )
     run_id = run_id or (
         json.loads(paths.manifest.read_text(encoding="utf-8"))["run_id"]
         if paths.manifest.exists()
-        else f"{gap_config['meta']['name']}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+        else f"{experiment}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
     )
 
     contract_dict = forecaster.contract.as_dict()
+    manifest: dict[str, Any] = {
+        "run_id": run_id,
+        "experiment": experiment,
+        "preregistration": preregistration,
+        "pilot_config": config,
+        "trailing_gap_config": gap_config,
+        "dataset_validation": json.loads(validation.to_json()),
+        "environment": collect_environment(contract_dict),
+        "model_contract": contract_dict,
+        "only_conditions": only_conditions,
+        "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    # Remaining wrapper metadata is additive. It cannot silently displace any key
+    # above: a collision is a bug in the wrapper and is raised, not merged over.
+    collisions = sorted(set(run_metadata) & set(manifest))
+    if collisions:
+        raise ValueError(
+            f"run_metadata may not overwrite manifest key(s) {collisions}; only "
+            f"'experiment' and 'preregistration' are overridable"
+        )
+    manifest.update(run_metadata)
     paths.manifest.write_text(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "experiment": gap_config["meta"]["name"],
-                "preregistration": gap_config["meta"]["preregistration"],
-                "pilot_config": config,
-                "trailing_gap_config": gap_config,
-                "dataset_validation": json.loads(validation.to_json()),
-                "environment": collect_environment(contract_dict),
-                "model_contract": contract_dict,
-                "only_conditions": only_conditions,
-                "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            },
-            indent=2, default=str,
-        ),
-        encoding="utf-8",
+        json.dumps(manifest, indent=2, default=str), encoding="utf-8"
     )
 
     selected = windows if limit_origins is None else windows[:limit_origins]
@@ -363,9 +452,7 @@ def run_trailing_gap(
             frame.groupby("origin_id")["target_sha256"].nunique().max()
         )
 
-    (paths.root / "run_summary.json").write_text(
-        json.dumps(summary, indent=2, default=str), encoding="utf-8"
-    )
+    write_run_summary(paths.root, summary)
     return summary
 
 
@@ -384,6 +471,26 @@ def main() -> int:
 
     config = yaml.safe_load((REPO_ROOT / args.config).read_text(encoding="utf-8"))
     gap_config = yaml.safe_load((REPO_ROOT / args.gap_config).read_text(encoding="utf-8"))
+
+    # Refuse a non-ETTh1 dataset BEFORE constructing a forecaster. This CLI runs
+    # the ETTh1 trailing-gap experiment; another dataset reaching it would get
+    # ETTh1's experiment identity in its manifest, skip its own wrapper's
+    # preconditions, and write into a directory the wrong runbook governs.
+    dataset_name = str(config.get("dataset", {}).get("name", ""))
+    if dataset_name and dataset_name != THIS_EXPERIMENT_DATASET:
+        print(
+            f"REFUSING TO RUN: --config names dataset {dataset_name!r}, but this "
+            f"entrypoint runs the {THIS_EXPERIMENT_DATASET} trailing-gap experiment.\n"
+            f"\n"
+            f"No model was loaded and no forecast was requested. Use the dataset's "
+            f"own entrypoint, which applies its own preconditions:\n"
+            f"\n"
+            f"    .venv/bin/python experiments/run_etth2.py --phase <phase>\n"
+            f"\n"
+            f"See docs/gpu_execution_runbook_etth2.md.",
+            file=sys.stderr, flush=True,
+        )
+        return 2
 
     if args.mock_model:
         forecaster: Forecaster = MockForecaster()

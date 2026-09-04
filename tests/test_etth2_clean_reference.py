@@ -235,7 +235,10 @@ def test_the_audit_itself_catches_a_non_qc_reference(tmp_path):
         formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
     )
     assert not report.passed
-    assert any("QC-only" in v for v in report.failures)
+    # The clean-conditions-only precheck now fires first and returns early, so
+    # the refusal is reported as "contains non-clean condition(s)" rather than
+    # by the later QC-only check. Either message is the same refusal.
+    assert any("non-clean condition" in v for v in report.failures), report.failures
     assert "EXCLUDED from the statistical analysis" in report.as_dict()["note"]
 
 
@@ -248,3 +251,143 @@ def test_an_absent_run_directory_is_a_failure_not_a_pass(tmp_path, two_runs):
     formal, _reference = two_runs
     with pytest.raises(CleanReferenceAuditFailure):
         assert_reference_excluded_from_analysis(tmp_path / "does_not_exist")
+
+
+# --------------------------------------------------------------------------- #
+# Gate hardening: staleness, misconfiguration, and time-of-check/time-of-use
+# --------------------------------------------------------------------------- #
+
+def test_the_same_directory_on_both_sides_is_refused(two_runs):
+    """A control that compares a directory with itself passes everything and
+    proves nothing. That is the worst failure mode, because it looks like success."""
+    from experiments.clean_reference_audit import assert_distinct_directories
+
+    formal, _reference = two_runs
+    with pytest.raises(CleanReferenceAuditFailure, match="SAME"):
+        assert_distinct_directories(formal, formal)
+    report = audit_clean_reference(
+        formal, formal, expected_origins=ORIGINS, expected_horizon=HORIZON
+    )
+    assert not report.passed
+    assert any("SAME" in v for v in report.failures)
+
+
+def test_a_symlinked_duplicate_is_also_refused(tmp_path, two_runs):
+    """Resolved paths, so a symlink cannot disguise the collision."""
+    from experiments.clean_reference_audit import assert_distinct_directories
+
+    formal, _reference = two_runs
+    link = tmp_path / "alias"
+    link.symlink_to(formal, target_is_directory=True)
+    with pytest.raises(CleanReferenceAuditFailure, match="SAME"):
+        assert_distinct_directories(formal, link)
+
+
+@pytest.mark.parametrize("column", ["dataset_sha256", "model_revision"])
+def test_a_missing_provenance_column_is_a_failure_not_a_skipped_check(two_runs, column):
+    """The shared audit SKIPS a column it cannot find. That must not read as a pass."""
+    formal, reference = two_runs
+    frame = pd.read_csv(formal / "window_results.csv")
+    frame.drop(columns=[column]).to_csv(formal / "window_results.csv", index=False)
+    report = audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
+    )
+    assert not report.passed, f"a missing {column} was silently skipped"
+    assert any(column in v and "missing provenance column" in v for v in report.failures)
+
+
+def test_both_sides_agreeing_with_each_other_is_not_enough(two_runs):
+    """Two runs can agree and both be stale. Anchor to what is loaded NOW."""
+    formal, reference = two_runs
+    # They agree with each other...
+    assert audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
+    ).passed
+    # ...but not with the current dataset.
+    report = audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON,
+        dataset_sha256="0" * 64, model_revision=REVISION,
+    )
+    assert not report.passed
+    assert any("matching each other is not enough" in v for v in report.failures)
+    assert sum("dataset_sha256" in v for v in report.failures) >= 2, "both sides"
+
+
+def test_anchoring_to_the_wrong_model_revision_is_refused(two_runs):
+    formal, reference = two_runs
+    report = audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON,
+        dataset_sha256=SHA, model_revision="a-different-checkpoint",
+    )
+    assert not report.passed
+    assert any("model_revision" in v for v in report.failures)
+
+
+def test_anchoring_to_the_correct_values_passes_and_is_recorded(two_runs):
+    """Non-vacuity: the anchor must not reject a correct pair."""
+    formal, reference = two_runs
+    report = audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON,
+        dataset_sha256=SHA, model_revision=REVISION,
+    )
+    assert report.passed, report.failures
+    assert report.details["anchored_dataset_sha256"] == SHA
+    assert report.details["anchored_model_revision"] == REVISION
+
+
+def test_a_formal_dir_already_holding_corrupted_conditions_is_refused(tmp_path):
+    """The audit gates the corrupted phase, so it must run before those exist."""
+    formal = _write_run(tmp_path / "formal", kinds=("clean", "trailing_nan"), seed=11)
+    reference = _write_run(tmp_path / "ref", seed=11)
+    report = audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
+    )
+    assert not report.passed
+    assert any("running too late to gate" in v for v in report.failures)
+
+
+def test_the_gate_records_digests_of_the_exact_bytes_it_audited(two_runs):
+    from experiments.clean_reference_audit import clean_artifact_digest
+
+    formal, reference = two_runs
+    report = audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
+    )
+    assert report.passed
+    assert set(report.clean_artifact_digests) == {"formal", "reference"}
+    for side, run_dir in (("formal", formal), ("reference", reference)):
+        assert report.clean_artifact_digests[side] == clean_artifact_digest(run_dir)
+        assert set(report.clean_artifact_digests[side]) == {
+            "predictions_long.csv", "window_results.csv"
+        }
+    assert report.as_dict()["clean_artifact_digests"] == report.clean_artifact_digests
+
+
+@pytest.mark.parametrize("side", ["formal", "reference"])
+@pytest.mark.parametrize("filename", ["predictions_long.csv", "window_results.csv"])
+def test_a_gate_stops_binding_once_the_clean_data_changes(two_runs, side, filename):
+    """Time-of-check to time-of-use: a valid gate must not survive an edit."""
+    from experiments.clean_reference_audit import verify_gate_still_binds
+
+    formal, reference = two_runs
+    report = audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
+    )
+    assert report.passed
+    # Still binds while nothing has moved.
+    verify_gate_still_binds(formal, reference, report.clean_artifact_digests)
+
+    target = (formal if side == "formal" else reference) / filename
+    target.write_bytes(target.read_bytes() + b"\n")     # one byte is enough
+    with pytest.raises(CleanReferenceAuditFailure, match="CHANGED since the audit"):
+        verify_gate_still_binds(formal, reference, report.clean_artifact_digests)
+
+
+def test_a_gate_with_no_digests_cannot_bind(two_runs):
+    from experiments.clean_reference_audit import verify_gate_still_binds
+
+    formal, reference = two_runs
+    with pytest.raises(CleanReferenceAuditFailure, match="records no clean-artifact"):
+        verify_gate_still_binds(formal, reference, {})
+    with pytest.raises(CleanReferenceAuditFailure, match="no digests for the formal"):
+        verify_gate_still_binds(formal, reference, {"reference": {"a": "b"}})
