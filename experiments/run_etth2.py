@@ -101,6 +101,65 @@ class ReplicationGateError(RuntimeError):
     """A precondition for this phase is not satisfied. Always a hard stop."""
 
 
+class CompletionInvariantViolation(RuntimeError):
+    """The finished matrix violates a frozen completion invariant.
+
+    Raised so the PROCESS fails. A failed cell recorded as a status value inside
+    an output file, with the invocation still exiting 0, is invisible to any
+    wrapper script and to anyone reading only the exit code — and the failure
+    would be silently absorbed into a "resume later" path that never happens.
+    """
+
+
+def assert_completion_invariants(
+    summary: dict[str, Any], *, expected_origins: int, conditions_per_origin: int
+) -> None:
+    """Every frozen completion invariant, checked on the finished matrix.
+
+    NO CELL IS RETRIED. A failure is surfaced at the process level and left for
+    a human to decide about; automatically re-running it would hide both the
+    failure and its cause.
+    """
+    expected_cells = expected_origins * conditions_per_origin
+    problems: list[str] = []
+
+    if summary.get("result_rows") is None:
+        problems.append(
+            f"the run did not complete: only "
+            f"{summary.get('origins_fully_completed')} of {expected_origins} "
+            f"origins finished, so the completion invariants were never evaluated"
+        )
+    checks = (
+        ("origins_fully_completed", expected_origins),
+        ("result_rows", expected_cells),
+        ("distinct_cells", expected_cells),
+        ("max_distinct_target_digests_per_origin", 1),
+    )
+    for key, expected in checks:
+        actual = summary.get(key)
+        if actual is not None and actual != expected:
+            problems.append(f"{key} is {actual}, expected {expected}")
+
+    status = summary.get("rows_by_status")
+    if status is not None and status != {"ok": expected_cells}:
+        problems.append(
+            f"rows_by_status is {status}, expected {{'ok': {expected_cells}}} — "
+            f"every cell must have succeeded"
+        )
+    failed = summary.get("forecasts_failed_this_process")
+    if failed:
+        problems.append(f"{failed} forecast(s) failed in this process")
+
+    if problems:
+        raise CompletionInvariantViolation(
+            "HARD STOP: the completed matrix violates a frozen completion "
+            "invariant:\n  - " + "\n  - ".join(problems)
+            + "\n\nNo cell was retried, deliberately: a failure must be visible "
+            "at the process level rather than absorbed into a resume path. "
+            "Investigate the recorded error before re-running anything."
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
@@ -407,8 +466,16 @@ def run_phase(
         # about specific bytes, and those bytes must still be the ones on disk.
         # A gate that was valid when written does not authorise proceeding if the
         # clean data has changed since.
+        if "clean_content_digests" not in gate:
+            raise ReplicationGateError(
+                f"HARD STOP: the gate in {formal_dir} predates the clean-content "
+                f"projection (it records whole-file digests, which could not tell "
+                f"a tampered clean row from a legitimately appended corrupted "
+                f"one). Re-run the '{PHASE_AUDIT}' phase to write a gate this "
+                f"version can verify."
+            )
         verify_gate_still_binds(
-            formal_dir, reference_dir, gate.get("clean_artifact_digests", {})
+            formal_dir, reference_dir, gate["clean_content_digests"]
         )
         # And the clean side must still be clean-only: corrupted rows appearing
         # between the audit and now would mean this phase has already started.
@@ -445,6 +512,19 @@ def run_phase(
     summary["git_commit"] = metadata["git_commit"]
     summary["git_dirty"] = metadata["git_dirty"]
     write_run_summary(run_dir, summary)
+
+    # The completion invariants apply to a formal-full pass that was asked to do
+    # the WHOLE matrix. A deliberately limited pass is a partial run by
+    # instruction, not a violation. The summary is persisted first, so the
+    # evidence survives the raise.
+    if phase == PHASE_FORMAL_FULL and limit_origins is None:
+        assert_completion_invariants(
+            summary,
+            expected_origins=int(design["expected_origins"]),
+            conditions_per_origin=int(
+                etth2_config["design"]["expected_conditions_per_origin"]
+            ),
+        )
     return summary
 
 
@@ -466,12 +546,18 @@ def main() -> int:
     args = parser.parse_args()
 
     etth2, pilot, gap = load_configs(args.config, args.pilot_config, args.gap_config)
-    summary = run_phase(
-        phase=args.phase, etth2_config=etth2, pilot_config=pilot, gap_config=gap,
-        mock=args.mock_model, limit_origins=args.limit_origins,
-        reference_dir=Path(args.reference_run_dir) if args.reference_run_dir else None,
-        formal_dir=Path(args.formal_run_dir) if args.formal_run_dir else None,
-    )
+    try:
+        summary = run_phase(
+            phase=args.phase, etth2_config=etth2, pilot_config=pilot, gap_config=gap,
+            mock=args.mock_model, limit_origins=args.limit_origins,
+            reference_dir=Path(args.reference_run_dir) if args.reference_run_dir else None,
+            formal_dir=Path(args.formal_run_dir) if args.formal_run_dir else None,
+        )
+    except CompletionInvariantViolation as exc:
+        # The run_summary.json on disk already records what happened; this makes
+        # the same fact visible to anything that only reads an exit code.
+        print(str(exc), file=sys.stderr, flush=True)
+        return 6
     print(json.dumps(summary, indent=2, default=str))
     return 0
 

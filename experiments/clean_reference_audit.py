@@ -66,9 +66,10 @@ class CleanReferenceReport:
     expected_origins: int = 0
     expected_horizon: int = 0
     details: dict[str, Any] = field(default_factory=dict)
-    # sha256 of the exact clean-artifact bytes this audit read, per side. The
-    # gate carries these so formal-full can prove the files have not moved.
-    clean_artifact_digests: dict[str, dict[str, str]] = field(default_factory=dict)
+    # sha256 of the canonical CLEAN-ROW projection this audit read, per side.
+    # The gate carries these so formal-full can prove the clean content has not
+    # moved, while remaining indifferent to rows it appends itself.
+    clean_content_digests: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -81,7 +82,7 @@ class CleanReferenceReport:
             "n_failures": len(self.failures),
             "failures": self.failures,
             "details": self.details,
-            "clean_artifact_digests": self.clean_artifact_digests,
+            "clean_content_digests": self.clean_content_digests,
             "tolerance": "none",
             "note": (
                 "clean_reference is QC-only and is EXCLUDED from the statistical "
@@ -115,21 +116,56 @@ def _size_failures(
     return failures
 
 
-def clean_artifact_digest(run_dir: Path) -> dict[str, str]:
-    """sha256 of the exact BYTES of the clean artifacts the audit read.
+# The clean-content projection. Each entry is (filename, the column whose value
+# identifies a clean row, the key columns that give a deterministic order).
+CLEAN_PROJECTION = (
+    ("predictions_long.csv", "condition_id", ("origin_id", "step_index")),
+    ("window_results.csv", "condition_id", ("origin_id", "condition_id")),
+)
 
-    The gate records these. At formal-full startup they are recomputed and
-    compared, which closes a time-of-check-to-time-of-use gap: a gate that was
-    valid when written must not authorise proceeding if the underlying clean
-    files have changed since. Binding to file bytes rather than to a summary
-    means any edit — a re-run, a hand-patched cell, a truncation — invalidates it.
+
+def clean_content_digest(run_dir: Path) -> dict[str, str]:
+    """sha256 of a canonical projection of the CLEAN ROWS ONLY.
+
+    Why not the whole file
+    ----------------------
+    An earlier version hashed the file's bytes. That could not distinguish
+    "a clean row was tampered with" from "formal-full legitimately appended
+    corrupted-condition rows to the same file while building the 2,314-row
+    matrix" — so ANY append invalidated the gate, and an interrupted
+    formal-full found its own prior legitimate progress reported as a gate
+    violation. Resumability was broken outright.
+
+    What this binds to instead
+    --------------------------
+    Exactly the audited clean content: the rows whose ``condition_id`` is
+    ``clean``, sorted by their keys, with columns in sorted order, rendered to
+    CSV and hashed. Everything else in the file is ignored, so appended
+    non-clean rows are free to vary.
+
+    This is not a loosening of the check on what it protects. The projection
+    includes EVERY column of every clean row, so a changed value, a changed key,
+    a removed clean row and an added clean row each change the hash. There is no
+    tolerance: one differing character is a different digest.
     """
     digests: dict[str, str] = {}
-    for name in ("predictions_long.csv", "window_results.csv"):
+    for name, marker_column, key_columns in CLEAN_PROJECTION:
         path = Path(run_dir) / name
         if not path.exists():
             raise CleanReferenceAuditFailure(f"{path} is absent; cannot digest")
-        digests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+        missing = [c for c in (marker_column, *key_columns) if c not in frame.columns]
+        if missing:
+            raise CleanReferenceAuditFailure(
+                f"{path} lacks column(s) {missing}; the clean projection is undefined"
+            )
+        clean = frame[frame[marker_column] == CLEAN_CONDITION_ID]
+        if clean.empty:
+            raise CleanReferenceAuditFailure(f"{path} contains no clean rows to bind to")
+        # mergesort is stable, so the order is a pure function of the key columns.
+        clean = clean.sort_values(list(key_columns), kind="mergesort")
+        canonical = clean[sorted(clean.columns)].to_csv(index=False)
+        digests[name] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return digests
 
 
@@ -300,11 +336,11 @@ def audit_clean_reference(
     except CleanReferenceAuditFailure as exc:
         report.failures.append(str(exc))
 
-    # Bind the gate to the exact bytes audited, for the TOCTOU re-check.
+    # Bind the gate to the clean CONTENT audited, for the TOCTOU re-check.
     try:
-        report.clean_artifact_digests = {
-            "formal": clean_artifact_digest(formal_dir),
-            "reference": clean_artifact_digest(reference_dir),
+        report.clean_content_digests = {
+            "formal": clean_content_digest(formal_dir),
+            "reference": clean_content_digest(reference_dir),
         }
     except CleanReferenceAuditFailure as exc:
         report.failures.append(str(exc))
@@ -332,17 +368,21 @@ def assert_clean_conditions_only(run_dir: Path, label: str) -> None:
 def verify_gate_still_binds(
     formal_dir: Path, reference_dir: Path, recorded: dict[str, dict[str, str]]
 ) -> None:
-    """TOCTOU re-check: the clean artifacts must be the ones the gate audited.
+    """TOCTOU re-check against the CLEAN CONTENT the gate audited.
 
-    A gate is a statement about specific bytes. If those bytes changed after it
-    was written — a re-run, a hand edit, a partially overwritten file — the gate
-    no longer says anything about what is on disk now, and must not authorise
+    A gate is a statement about specific clean rows. If those rows changed after
+    it was written — a re-run, a hand edit, a removed or added clean row — the
+    gate no longer says anything about the data on disk and must not authorise
     proceeding.
+
+    Corrupted-condition rows appended by formal-full are outside the projection
+    and are expected to appear, so a resumed run is authorised by the same gate
+    that authorised its first attempt.
     """
     if not recorded:
         raise CleanReferenceAuditFailure(
-            "HARD STOP: the gate records no clean-artifact digests, so it cannot "
-            "be bound to the files on disk. Re-run the audit."
+            "HARD STOP: the gate records no clean-content digests, so it cannot "
+            "be bound to the data on disk. Re-run the audit."
         )
     for label, run_dir in (("formal", formal_dir), ("reference", reference_dir)):
         expected = recorded.get(label)
@@ -350,15 +390,17 @@ def verify_gate_still_binds(
             raise CleanReferenceAuditFailure(
                 f"HARD STOP: the gate records no digests for the {label} run."
             )
-        actual = clean_artifact_digest(run_dir)
+        actual = clean_content_digest(run_dir)
         for name, digest in expected.items():
             if actual.get(name) != digest:
                 raise CleanReferenceAuditFailure(
-                    f"HARD STOP: {label}/{name} has CHANGED since the audit "
-                    f"passed (gate recorded {digest}, file is now "
-                    f"{actual.get(name)}). The gate no longer describes the data "
-                    f"on disk. Re-run the clean passes and the audit; do not "
-                    f"proceed on a stale authorisation."
+                    f"HARD STOP: the CLEAN ROWS of {label}/{name} have CHANGED "
+                    f"since the audit passed (gate recorded {digest}, the clean "
+                    f"projection is now {actual.get(name)}). This is not an "
+                    f"appended corrupted-condition row — those are excluded from "
+                    f"the projection — it is a change to audited clean content. "
+                    f"Re-run the clean passes and the audit; do not proceed on a "
+                    f"stale authorisation."
                 )
 
 

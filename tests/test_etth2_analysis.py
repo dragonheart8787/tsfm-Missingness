@@ -155,7 +155,7 @@ from experiments.analyze_etth2 import (
     analyse_etth2,
     apply_family_correct_reporting,
     numeric_snapshot_of,
-    run_is_mock,
+    assess_provenance,
     verify_reporting,
 )
 from experiments.reporting_v2 import INTERPRETATION_B
@@ -281,40 +281,6 @@ def test_correct_output_carries_no_erratum_id_at_all():
 # --------------------------------------------------------------------------- #
 # Mock detection and the stamp
 # --------------------------------------------------------------------------- #
-
-def test_a_run_is_detected_as_mock_from_its_own_artifacts(tmp_path):
-    run = tmp_path / "run"
-    run.mkdir()
-    (run / "run_manifest.json").write_text(json.dumps({"mock_model": True}), encoding="utf-8")
-    assert run_is_mock(run) is True
-
-    real = tmp_path / "real"
-    real.mkdir()
-    (real / "run_manifest.json").write_text(
-        json.dumps({"mock_model": False, "model_contract": {"revision": "29ec3766"}}),
-        encoding="utf-8",
-    )
-    (real / "run_summary.json").write_text(json.dumps({"mock_model": False}), encoding="utf-8")
-    assert run_is_mock(real) is False
-
-
-def test_a_mock_revision_alone_is_enough_to_detect_a_mock_run(tmp_path):
-    run = tmp_path / "run"
-    run.mkdir()
-    (run / "run_manifest.json").write_text(
-        json.dumps({"model_contract": {"revision": "mock-revision"}}), encoding="utf-8",
-    )
-    assert run_is_mock(run) is True
-
-
-def test_an_unprovenanced_run_is_treated_as_mock(tmp_path):
-    """The safe direction: refuse a real run rather than analyse a fake one."""
-    run = tmp_path / "run"
-    run.mkdir()
-    assert run_is_mock(run) is True
-    (run / "run_manifest.json").write_text("{not json", encoding="utf-8")
-    assert run_is_mock(run) is True
-
 
 def test_the_mock_stamp_is_complete():
     assert MOCK_STAMP["mock_model"] is True
@@ -469,3 +435,153 @@ def test_a_failed_verification_leaves_no_official_output(tmp_path):
 def test_the_official_path_is_never_the_staging_path():
     assert STAGING_SUFFIX and STAGING_SUFFIX.startswith(".")
     assert not STAGING_SUFFIX.endswith("/")
+
+
+# --------------------------------------------------------------------------- #
+# Positive provenance: REAL only on explicit, consistent evidence
+# --------------------------------------------------------------------------- #
+
+from experiments.analyze_etth2 import (
+    EXPECTED_ENTRYPOINT,
+    EXPECTED_EXPERIMENT,
+    EXPECTED_PHASE,
+    PROVENANCE_INVALID,
+    PROVENANCE_MOCK,
+    PROVENANCE_REAL,
+    InvalidProvenance,
+)
+
+REAL_MANIFEST = {
+    "mock_model": False,
+    "experiment": EXPECTED_EXPERIMENT,
+    "phase": EXPECTED_PHASE,
+    "execution_entrypoint": EXPECTED_ENTRYPOINT,
+    "model_contract": {"revision": "29ec3766d36d6f73f0696f85560a422f50e8498c"},
+}
+REAL_SUMMARY = {k: REAL_MANIFEST[k] for k in
+                ("mock_model", "experiment", "phase", "execution_entrypoint")}
+MOCK_MANIFEST = dict(REAL_MANIFEST, mock_model=True,
+                     model_contract={"revision": "mock-revision"})
+MOCK_SUMMARY = dict(REAL_SUMMARY, mock_model=True)
+
+
+def _run(tmp_path: Path, manifest, summary, name="run") -> Path:
+    run = tmp_path / name
+    run.mkdir(parents=True, exist_ok=True)
+    if manifest is not None:
+        (run / "run_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8")
+    if summary is not None:
+        (run / "run_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    return run
+
+
+def test_a_legitimate_real_run_is_REAL(tmp_path):
+    verdict = assess_provenance(_run(tmp_path, REAL_MANIFEST, REAL_SUMMARY))
+    assert verdict.kind == PROVENANCE_REAL
+    assert verdict.is_real and not verdict.is_mock
+    assert verdict.reasons == []
+
+
+def test_a_legitimate_mock_run_is_MOCK(tmp_path):
+    verdict = assess_provenance(_run(tmp_path, MOCK_MANIFEST, MOCK_SUMMARY))
+    assert verdict.kind == PROVENANCE_MOCK
+    assert verdict.is_mock and not verdict.is_real
+
+
+@pytest.mark.parametrize(
+    "label,manifest,summary,needle",
+    [
+        ("empty manifest", {}, REAL_SUMMARY, "does not carry"),
+        ("only mock_model false", {"mock_model": False}, REAL_SUMMARY, "does not carry"),
+        ("no summary at all", REAL_MANIFEST, None, "run_summary.json is absent"),
+        ("no manifest at all", None, REAL_SUMMARY, "run_manifest.json is absent"),
+        ("contradictory mock flags", REAL_MANIFEST,
+         dict(REAL_SUMMARY, mock_model=True), "disagree on 'mock_model'"),
+        ("wrong experiment",
+         dict(REAL_MANIFEST, experiment="trailing-gap-mechanism-v1"),
+         dict(REAL_SUMMARY, experiment="trailing-gap-mechanism-v1"), "experiment is"),
+        ("wrong phase", dict(REAL_MANIFEST, phase="clean-reference"),
+         dict(REAL_SUMMARY, phase="clean-reference"), "phase is"),
+        ("wrong entrypoint",
+         dict(REAL_MANIFEST, execution_entrypoint="experiments/run_trailing_gap.py"),
+         dict(REAL_SUMMARY, execution_entrypoint="experiments/run_trailing_gap.py"),
+         "execution_entrypoint is"),
+        ("malformed mock_model", dict(REAL_MANIFEST, mock_model="false"),
+         dict(REAL_SUMMARY, mock_model="false"), "not a boolean"),
+        ("no revision", {k: v for k, v in REAL_MANIFEST.items()
+                         if k != "model_contract"}, REAL_SUMMARY,
+         "no model_contract.revision"),
+        ("real flag, placeholder revision",
+         dict(REAL_MANIFEST, model_contract={"revision": "mock-revision"}),
+         REAL_SUMMARY, "is a placeholder"),
+        ("mock flag, real revision",
+         dict(MOCK_MANIFEST,
+              model_contract={"revision": "29ec3766d36d6f73f0696f85560a422f50e8498c"}),
+         MOCK_SUMMARY, "looks real"),
+    ],
+)
+def test_every_broken_provenance_case_is_INVALID(tmp_path, label, manifest, summary, needle):
+    verdict = assess_provenance(_run(tmp_path, manifest, summary, name=label[:20]))
+    assert verdict.kind == PROVENANCE_INVALID, label
+    assert any(needle in reason for reason in verdict.reasons), (label, verdict.reasons)
+
+
+def test_an_empty_directory_is_INVALID_not_real(tmp_path):
+    run = tmp_path / "nothing"
+    run.mkdir()
+    assert assess_provenance(run).kind == PROVENANCE_INVALID
+
+
+def test_unreadable_json_is_INVALID(tmp_path):
+    run = tmp_path / "broken"
+    run.mkdir()
+    (run / "run_manifest.json").write_text("{not json", encoding="utf-8")
+    (run / "run_summary.json").write_text(json.dumps(REAL_SUMMARY), encoding="utf-8")
+    verdict = assess_provenance(run)
+    assert verdict.kind == PROVENANCE_INVALID
+    assert any("unreadable" in r for r in verdict.reasons)
+
+
+def test_the_three_verdicts_are_distinct(tmp_path):
+    """REAL, MOCK and INVALID must be three outcomes, not two plus a fallback."""
+    kinds = {
+        assess_provenance(_run(tmp_path, REAL_MANIFEST, REAL_SUMMARY, "r")).kind,
+        assess_provenance(_run(tmp_path, MOCK_MANIFEST, MOCK_SUMMARY, "m")).kind,
+        assess_provenance(_run(tmp_path, {}, REAL_SUMMARY, "i")).kind,
+    }
+    assert kinds == {PROVENANCE_REAL, PROVENANCE_MOCK, PROVENANCE_INVALID}
+
+
+def test_allow_mock_analysis_does_NOT_bypass_invalid_provenance(tmp_path, config):
+    """The core requirement: broken provenance is a DIFFERENT failure class."""
+    etth2 = yaml.safe_load(
+        (REPO_ROOT / "configs" / "etth2_config.yaml").read_text(encoding="utf-8"))
+    gap = yaml.safe_load(
+        (REPO_ROOT / "configs" / "trailing_gap_config.yaml").read_text(encoding="utf-8"))
+    run = _run(tmp_path, {}, REAL_SUMMARY, "invalid")
+
+    for allow in (False, True):
+        with pytest.raises(InvalidProvenance) as excinfo:
+            analyse_etth2(
+                run, etth2_config=etth2, pilot_config=config, gap_config=gap,
+                out_dir=tmp_path / f"out{int(allow)}", allow_mock_analysis=allow,
+            )
+        assert PROVENANCE_INVALID in str(excinfo.value)
+        assert "does NOT bypass this" in str(excinfo.value)
+    assert not (tmp_path / "out0").exists()
+    assert not (tmp_path / "out1").exists()
+
+
+def test_invalid_provenance_is_not_a_mock_refusal(tmp_path, config):
+    """Distinct exception types, so a caller cannot conflate them."""
+    etth2 = yaml.safe_load(
+        (REPO_ROOT / "configs" / "etth2_config.yaml").read_text(encoding="utf-8"))
+    gap = yaml.safe_load(
+        (REPO_ROOT / "configs" / "trailing_gap_config.yaml").read_text(encoding="utf-8"))
+    run = _run(tmp_path, {}, REAL_SUMMARY, "invalid2")
+    with pytest.raises(InvalidProvenance):
+        analyse_etth2(run, etth2_config=etth2, pilot_config=config, gap_config=gap,
+                      out_dir=tmp_path / "o")
+    assert not issubclass(InvalidProvenance, MockAnalysisRefused)
+    assert not issubclass(MockAnalysisRefused, InvalidProvenance)

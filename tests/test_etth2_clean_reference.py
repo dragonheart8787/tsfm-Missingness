@@ -347,47 +347,140 @@ def test_a_formal_dir_already_holding_corrupted_conditions_is_refused(tmp_path):
 
 
 def test_the_gate_records_digests_of_the_exact_bytes_it_audited(two_runs):
-    from experiments.clean_reference_audit import clean_artifact_digest
+    from experiments.clean_reference_audit import clean_content_digest
 
     formal, reference = two_runs
     report = audit_clean_reference(
         formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
     )
     assert report.passed
-    assert set(report.clean_artifact_digests) == {"formal", "reference"}
+    assert set(report.clean_content_digests) == {"formal", "reference"}
     for side, run_dir in (("formal", formal), ("reference", reference)):
-        assert report.clean_artifact_digests[side] == clean_artifact_digest(run_dir)
-        assert set(report.clean_artifact_digests[side]) == {
+        assert report.clean_content_digests[side] == clean_content_digest(run_dir)
+        assert set(report.clean_content_digests[side]) == {
             "predictions_long.csv", "window_results.csv"
         }
-    assert report.as_dict()["clean_artifact_digests"] == report.clean_artifact_digests
+    assert report.as_dict()["clean_content_digests"] == report.clean_content_digests
+
+
+def _gate(two_runs):
+    formal, reference = two_runs
+    report = audit_clean_reference(
+        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
+    )
+    assert report.passed, report.failures
+    return formal, reference, report.clean_content_digests
+
+
+def test_appending_non_clean_rows_does_NOT_invalidate_the_gate(two_runs):
+    """The resumability bug this projection fixes.
+
+    formal-full appends corrupted-condition rows to the same files while
+    building the 2,314-row matrix. Under a whole-file digest every one of those
+    appends invalidated the gate, so an interrupted run found its own legitimate
+    progress reported as tampering. They are outside the projection now.
+    """
+    from experiments.clean_reference_audit import verify_gate_still_binds
+
+    formal, reference, digests = _gate(two_runs)
+
+    # Append the way the runner does — open in append mode and write new rows,
+    # leaving every existing byte untouched. Rewriting the whole file through
+    # pandas would reformat the clean rows' floats, which IS a change to clean
+    # content and is correctly rejected; the runner never does that.
+    for filename, condition, kind in (
+        ("predictions_long.csv", "trailing_nan_g16", None),
+        ("window_results.csv", "internal_block_g64", "internal_block"),
+    ):
+        path = formal / filename
+        frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+        rows = frame[frame["condition_id"] == "clean"].head(20).copy()
+        rows["condition_id"] = condition
+        if kind is not None:
+            rows["kind"] = kind
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(rows.to_csv(index=False, header=False))
+
+    verify_gate_still_binds(formal, reference, digests)   # must NOT raise
+
+    # ...and the appended rows really are there.
+    after = pd.read_csv(formal / "predictions_long.csv", dtype=str, keep_default_na=False)
+    assert (after["condition_id"] == "trailing_nan_g16").sum() == 20
 
 
 @pytest.mark.parametrize("side", ["formal", "reference"])
 @pytest.mark.parametrize("filename", ["predictions_long.csv", "window_results.csv"])
-def test_a_gate_stops_binding_once_the_clean_data_changes(two_runs, side, filename):
-    """Time-of-check to time-of-use: a valid gate must not survive an edit."""
+def test_a_MUTATED_clean_row_still_hard_fails(two_runs, side, filename):
+    """The fix must not become permissive toward what it protects."""
     from experiments.clean_reference_audit import verify_gate_still_binds
 
-    formal, reference = two_runs
-    report = audit_clean_reference(
-        formal, reference, expected_origins=ORIGINS, expected_horizon=HORIZON
-    )
-    assert report.passed
-    # Still binds while nothing has moved.
-    verify_gate_still_binds(formal, reference, report.clean_artifact_digests)
+    formal, reference, digests = _gate(two_runs)
+    verify_gate_still_binds(formal, reference, digests)   # binds before the edit
 
     target = (formal if side == "formal" else reference) / filename
-    target.write_bytes(target.read_bytes() + b"\n")     # one byte is enough
-    with pytest.raises(CleanReferenceAuditFailure, match="CHANGED since the audit"):
-        verify_gate_still_binds(formal, reference, report.clean_artifact_digests)
+    frame = pd.read_csv(target, dtype=str, keep_default_na=False)
+    clean_rows = frame.index[frame["condition_id"] == "clean"]
+    column = "median_prediction" if filename == "predictions_long.csv" else "mae"
+    frame.loc[clean_rows[0], column] = "999.0"
+    frame.to_csv(target, index=False)
+
+    with pytest.raises(CleanReferenceAuditFailure, match="CLEAN ROWS.*CHANGED"):
+        verify_gate_still_binds(formal, reference, digests)
+
+
+@pytest.mark.parametrize("side", ["formal", "reference"])
+def test_a_REMOVED_clean_row_still_hard_fails(two_runs, side):
+    from experiments.clean_reference_audit import verify_gate_still_binds
+
+    formal, reference, digests = _gate(two_runs)
+    target = (formal if side == "formal" else reference) / "predictions_long.csv"
+    frame = pd.read_csv(target, dtype=str, keep_default_na=False)
+    frame.iloc[1:].to_csv(target, index=False)
+    with pytest.raises(CleanReferenceAuditFailure, match="CLEAN ROWS.*CHANGED"):
+        verify_gate_still_binds(formal, reference, digests)
+
+
+@pytest.mark.parametrize("side", ["formal", "reference"])
+def test_an_ADDED_clean_row_still_hard_fails(two_runs, side):
+    from experiments.clean_reference_audit import verify_gate_still_binds
+
+    formal, reference, digests = _gate(two_runs)
+    target = (formal if side == "formal" else reference) / "predictions_long.csv"
+    frame = pd.read_csv(target, dtype=str, keep_default_na=False)
+    extra = frame.head(1).copy()
+    extra["origin_id"] = "9999"
+    pd.concat([frame, extra]).to_csv(target, index=False)
+    with pytest.raises(CleanReferenceAuditFailure, match="CLEAN ROWS.*CHANGED"):
+        verify_gate_still_binds(formal, reference, digests)
+
+
+def test_a_reordered_clean_file_still_binds(two_runs):
+    """The projection sorts, so row ORDER is not part of the invariant."""
+    from experiments.clean_reference_audit import verify_gate_still_binds
+
+    formal, reference, digests = _gate(two_runs)
+    target = formal / "predictions_long.csv"
+    frame = pd.read_csv(target, dtype=str, keep_default_na=False)
+    frame.iloc[::-1].to_csv(target, index=False)
+    verify_gate_still_binds(formal, reference, digests)   # must NOT raise
+
+
+def test_a_gate_lacking_clean_rows_entirely_is_refused(tmp_path):
+    from experiments.clean_reference_audit import clean_content_digest
+
+    run = _write_run(tmp_path / "corrupt_only", kinds=("trailing_nan",), seed=5)
+    frame = pd.read_csv(run / "predictions_long.csv")
+    frame["condition_id"] = "trailing_nan_g16"
+    frame.to_csv(run / "predictions_long.csv", index=False)
+    with pytest.raises(CleanReferenceAuditFailure, match="no clean rows to bind to"):
+        clean_content_digest(run)
 
 
 def test_a_gate_with_no_digests_cannot_bind(two_runs):
     from experiments.clean_reference_audit import verify_gate_still_binds
 
     formal, reference = two_runs
-    with pytest.raises(CleanReferenceAuditFailure, match="records no clean-artifact"):
+    with pytest.raises(CleanReferenceAuditFailure, match="records no clean-content"):
         verify_gate_still_binds(formal, reference, {})
     with pytest.raises(CleanReferenceAuditFailure, match="no digests for the formal"):
         verify_gate_still_binds(formal, reference, {"reference": {"a": "b"}})

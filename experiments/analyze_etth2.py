@@ -38,6 +38,7 @@ import json
 import os
 import shutil
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -102,34 +103,154 @@ MOCK_STAMP: dict[str, Any] = {
 MOCK_LABEL_PREFIX = "MOCK_NOT_A_FINDING__"
 
 
-def run_is_mock(run_dir: Path) -> bool:
-    """Was this run produced by the mock forecaster?
+# The three verdicts. INVALID_PROVENANCE is a DIFFERENT FAILURE CLASS from a
+# known mock: it means the run cannot be identified at all, and --allow-mock-
+# analysis does not and must not bypass it. That flag exists to analyse a run
+# whose mockness is established; it is not a way to salvage broken provenance.
+PROVENANCE_REAL = "REAL"
+PROVENANCE_MOCK = "MOCK"
+PROVENANCE_INVALID = "INVALID_PROVENANCE"
 
-    Read from the run's own manifest and summary — the artifacts the runner
-    wrote — rather than from a caller-supplied flag, so the answer cannot be
-    lost by forgetting to pass an argument. A run whose provenance cannot be
-    established is treated as mock: the safe direction is refusing a real run,
-    not analysing a fake one.
+# Fields BOTH the manifest and the summary must carry, and agree on.
+REQUIRED_SHARED_FIELDS = ("mock_model", "experiment", "phase", "execution_entrypoint")
+EXPECTED_EXPERIMENT = "etth2-trailing-gap-replication-v1"
+EXPECTED_PHASE = "formal-full"
+EXPECTED_ENTRYPOINT = "experiments/run_etth2.py"
+# A revision that looks like this is a placeholder, not a checkpoint.
+PLACEHOLDER_REVISION_PREFIXES = ("mock", "test", "fake", "dummy", "placeholder", "")
+MIN_REVISION_LENGTH = 7
+
+
+class InvalidProvenance(RuntimeError):
+    """The run cannot be established as either real or mock. Never bypassable."""
+
+
+@dataclass
+class ProvenanceVerdict:
+    """What a run's own artifacts positively establish about it."""
+
+    kind: str
+    reasons: list[str] = field(default_factory=list)
+    manifest: dict[str, Any] = field(default_factory=dict)
+    summary: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_mock(self) -> bool:
+        return self.kind == PROVENANCE_MOCK
+
+    @property
+    def is_real(self) -> bool:
+        return self.kind == PROVENANCE_REAL
+
+
+def _looks_like_a_real_revision(revision: Any) -> bool:
+    text = str(revision or "").strip().lower()
+    if len(text) < MIN_REVISION_LENGTH:
+        return False
+    return not any(text.startswith(p) for p in PLACEHOLDER_REVISION_PREFIXES if p)
+
+
+def assess_provenance(run_dir: Path) -> ProvenanceVerdict:
+    """Establish REAL / MOCK / INVALID_PROVENANCE from POSITIVE evidence only.
+
+    A run is REAL only when the manifest and the summary EXPLICITLY and
+    CONSISTENTLY establish every one of: ``mock_model`` false, the ETTh2
+    experiment identity, the ``formal-full`` phase, the expected entrypoint, and
+    a real, non-placeholder model revision.
+
+    Nothing is inferred from absence. The earlier logic returned "real" whenever
+    it failed to find a mock marker, so an empty ``{}`` manifest — or a manifest
+    naming ETTh1's experiment, or a clean-reference phase — read as a real ETTh2
+    formal-full result. Every one of those is now INVALID_PROVENANCE.
     """
     run_dir = Path(run_dir)
+    reasons: list[str] = []
+    documents: dict[str, dict[str, Any]] = {}
+
     for name in ("run_manifest.json", "run_summary.json"):
         path = run_dir / name
         if not path.exists():
+            reasons.append(f"{name} is absent")
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return True
-        if payload.get("mock_model") is True:
-            return True
-        contract = payload.get("model_contract") or {}
-        if str(contract.get("revision", "")).startswith("mock"):
-            return True
-    if not (run_dir / "run_manifest.json").exists() and not (
-        run_dir / "run_summary.json"
-    ).exists():
-        return True
-    return False
+        except (OSError, json.JSONDecodeError) as exc:
+            reasons.append(f"{name} is unreadable: {type(exc).__name__}")
+            continue
+        if not isinstance(payload, dict):
+            reasons.append(f"{name} is not a JSON object")
+            continue
+        documents[name] = payload
+
+    if len(documents) != 2:
+        return ProvenanceVerdict(PROVENANCE_INVALID, reasons)
+
+    manifest, summary = documents["run_manifest.json"], documents["run_summary.json"]
+
+    # Presence, in BOTH.
+    for name, payload in (("manifest", manifest), ("summary", summary)):
+        for field_name in REQUIRED_SHARED_FIELDS:
+            if field_name not in payload:
+                reasons.append(f"{name} does not carry {field_name!r}")
+
+    # Well-formedness.
+    for name, payload in (("manifest", manifest), ("summary", summary)):
+        value = payload.get("mock_model")
+        if "mock_model" in payload and not isinstance(value, bool):
+            reasons.append(f"{name}.mock_model is {value!r}, not a boolean")
+
+    # Agreement between the two documents.
+    for field_name in REQUIRED_SHARED_FIELDS:
+        if field_name in manifest and field_name in summary:
+            if manifest[field_name] != summary[field_name]:
+                reasons.append(
+                    f"manifest and summary disagree on {field_name!r}: "
+                    f"{manifest[field_name]!r} vs {summary[field_name]!r}"
+                )
+
+    # The values themselves.
+    if manifest.get("experiment") != EXPECTED_EXPERIMENT:
+        reasons.append(
+            f"experiment is {manifest.get('experiment')!r}, expected "
+            f"{EXPECTED_EXPERIMENT!r}"
+        )
+    if manifest.get("phase") != EXPECTED_PHASE:
+        reasons.append(
+            f"phase is {manifest.get('phase')!r}; only a completed "
+            f"{EXPECTED_PHASE!r} run may be analysed"
+        )
+    if manifest.get("execution_entrypoint") != EXPECTED_ENTRYPOINT:
+        reasons.append(
+            f"execution_entrypoint is {manifest.get('execution_entrypoint')!r}, "
+            f"expected {EXPECTED_ENTRYPOINT!r}"
+        )
+
+    revision = (manifest.get("model_contract") or {}).get("revision")
+    if revision is None:
+        reasons.append("manifest carries no model_contract.revision")
+
+    if reasons:
+        return ProvenanceVerdict(PROVENANCE_INVALID, reasons, manifest, summary)
+
+    # Only now, with everything present, well formed and agreeing, is the
+    # mock/real question even askable.
+    declared_mock = bool(manifest["mock_model"])
+    revision_is_real = _looks_like_a_real_revision(revision)
+    if declared_mock and revision_is_real:
+        return ProvenanceVerdict(
+            PROVENANCE_INVALID,
+            [f"mock_model is true but model_contract.revision {revision!r} looks real"],
+            manifest, summary,
+        )
+    if not declared_mock and not revision_is_real:
+        return ProvenanceVerdict(
+            PROVENANCE_INVALID,
+            [f"mock_model is false but model_contract.revision {revision!r} is a "
+             f"placeholder, not a checkpoint"],
+            manifest, summary,
+        )
+    kind = PROVENANCE_MOCK if declared_mock else PROVENANCE_REAL
+    return ProvenanceVerdict(kind, [], manifest, summary)
 
 
 def gap_stats_from_rows(rows: list[dict[str, Any]], *, mean_clean_mae: float) -> list[GapStat]:
@@ -375,7 +496,28 @@ def analyse_etth2(
     effective = build_effective_config(pilot_config, etth2_config)
     official = Path(out_dir) if out_dir else run_dir / "analysis"
 
-    mock = run_is_mock(run_dir)
+    verdict = assess_provenance(run_dir)
+    if verdict.kind == PROVENANCE_INVALID:
+        # A DIFFERENT failure class from a known mock. --allow-mock-analysis
+        # does not reach here, by design: that flag analyses a run whose
+        # mockness is established, and cannot establish anything about a run
+        # that failed to identify itself.
+        raise InvalidProvenance(
+            f"REFUSING TO ANALYSE: {run_dir} has {PROVENANCE_INVALID}.\n"
+            f"\n"
+            f"A run is analysable only when its manifest AND its summary "
+            f"explicitly and consistently establish mock_model, the ETTh2 "
+            f"experiment identity, the {EXPECTED_PHASE} phase, the expected "
+            f"entrypoint, and a real model revision. This run does not:\n"
+            + "".join(f"  - {reason}\n" for reason in verdict.reasons)
+            + f"\n"
+            f"--allow-mock-analysis does NOT bypass this. That flag is for a "
+            f"known-mock pipeline exercise; broken or ambiguous provenance is a "
+            f"different failure, and salvaging it is not a decision this tool "
+            f"may make. Re-run the phase, or report the directory."
+        )
+
+    mock = verdict.is_mock
     if mock and not allow_mock_analysis:
         raise MockAnalysisRefused(
             f"REFUSING TO ANALYSE: {run_dir} was produced by the MOCK forecaster.\n"
@@ -513,6 +655,9 @@ def main() -> int:
             run_dir, etth2_config=etth2, pilot_config=pilot, gap_config=gap,
             out_dir=out_dir, allow_mock_analysis=args.allow_mock_analysis,
         )
+    except InvalidProvenance as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        return 5
     except MockAnalysisRefused as exc:
         print(str(exc), file=sys.stderr, flush=True)
         return 3
