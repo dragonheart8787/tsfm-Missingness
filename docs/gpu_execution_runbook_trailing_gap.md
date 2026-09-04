@@ -2,17 +2,17 @@
 
 **For a human to run on the GPU host, in order. Do not skip or reorder steps.**
 
-Steps 2 and 4 are **hard stops**: if either fails, stop and report. Do not
+Steps 2, 3.0, and 4 are **hard stops**: if any fails, stop and report. Do not
 select a tolerance after seeing a discrepancy — a mismatch is a stop, not a
 tuning problem.
 
-**Execution commit (F): `<FROZEN_COMMIT_F2>`** — the implementation freeze. This
+**Execution commit (F3): `e5f1183b54591856285ebc0fe7b0e2ac49ed6fcb`** — the implementation freeze. This
 is what step 1 checks out and what the run manifest must record as executed.
 
-This runbook ships in a later documentation commit (D), which names F above.
-**D is never the executed commit.** If `git rev-parse HEAD` during the run does
-not equal F, stop: the manifest would otherwise attribute results to the wrong
-tree.
+This runbook ships in a later documentation commit (D4), which names F3 above.
+**D4 is never the executed commit** — no documentation commit ever is. If
+`git rev-parse HEAD` during the run does not equal F3, stop: the manifest would
+otherwise attribute results to the wrong tree.
 
 ---
 
@@ -22,9 +22,9 @@ tree.
 git clone https://github.com/dragonheart8787/tsfm-Missingness.git
 cd tsfm-Missingness
 git fetch origin claude/chronos2-missingness-pilot-xwx5y7
-git checkout <FROZEN_COMMIT_F2>    # F, the implementation-freeze commit
+git checkout e5f1183b54591856285ebc0fe7b0e2ac49ed6fcb    # F3, the implementation-freeze commit
 git status --porcelain            # must print nothing
-git rev-parse HEAD                # must equal F; record it in the run manifest
+git rev-parse HEAD                # must equal F3; record it in the run manifest
 
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python torch --torch-backend cu124
@@ -80,15 +80,23 @@ into, silently mixing cells from two different runs.
 
 ```bash
 # Wrapped in a subshell so the `exit` cannot close your login shell when pasted.
-( test -e results/trailing_gap_v1 && {
+# The subshell is the FINAL command: its status is the block's status, so a
+# script wrapping this in `|| abort` actually halts. Do not append anything
+# after it -- a trailing `echo` would mask the status with its own 0.
+(
+  if test -e results/trailing_gap_v1; then
     echo "HARD STOP: results/trailing_gap_v1 already exists."
     echo "Do not delete, overwrite, or reuse it. Report it and await instruction."
     ls -la results/trailing_gap_v1
     exit 1
-  }
-  echo "OK: no existing run directory; safe to initialize." )
-echo "guard exit status: $?    # 0 = safe to proceed, 1 = HARD STOP"
+  fi
+  echo "OK: no existing run directory; safe to initialize."
+)
 ```
+
+The block returns **0** when the directory is absent and **1** when it exists,
+and leaves your interactive shell alive in both cases. To read the status
+explicitly, run `echo $?` **as a separate command** afterwards.
 
 > **HARD STOP.** If the directory exists, stop and report. **Do not delete it,
 > do not overwrite it, and do not silently reuse it** — it may hold results
@@ -98,7 +106,7 @@ echo "guard exit status: $?    # 0 = safe to proceed, 1 = HARD STOP"
 **This guard applies at INITIALIZATION ONLY.** Once step 3 has created the
 directory, it is the correct one: step 5's full-matrix pass and every
 interruption-recovery resume must continue using **that same directory** and the
-**same execution commit F**. Do not re-run this guard before step 5 or before a
+**same execution commit F3**. Do not re-run this guard before step 5 or before a
 resume — resumption at origin × condition granularity is the intended behavior
 there, and re-running the guard would wrongly block it.
 
@@ -202,7 +210,7 @@ classification.
 
 ---
 
-## Quick reference — the two hard stops
+## Quick reference — the three hard stops
 
 | Step | Condition | Action on failure |
 |---|---|---|
