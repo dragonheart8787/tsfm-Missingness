@@ -503,7 +503,10 @@ def test_non_significant_slope_is_never_called_flat_or_equivalent():
 def test_the_slope_scan_covers_the_shipped_code():
     """The exclusion above must not have made the scan vacuous."""
     scanned = {
-        str(path.relative_to(REPO_ROOT))
+        # as_posix(), not str(): str() is separator-dependent, so on Windows the
+        # discovered paths are backslash-separated and can never match the
+        # forward-slash required list below.
+        path.relative_to(REPO_ROOT).as_posix()
         for pattern in ("*.py", "*.md")
         for path in REPO_ROOT.rglob(pattern)
         if not {".venv", ".git", "tests"} & set(path.relative_to(REPO_ROOT).parts)
