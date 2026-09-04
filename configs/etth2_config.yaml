@@ -1,0 +1,151 @@
+# =============================================================================
+# ETTh2/OT trailing-gap REPLICATION — dataset and execution config.
+#
+# NOT YET EXECUTED. No forecast has been produced under this configuration.
+#
+# This file declares ONLY what is new to the replication: the ETTh2 dataset
+# contract, the derived origin count, and the two-pass clean design. Every
+# shared scientific convention — the gap lengths, the SESOI, the bootstrap
+# settings, the model contract, L/H/stride, the four-way per-gap rule — is READ
+# FROM configs/pilot_config.yaml and configs/trailing_gap_config.yaml and is
+# never redefined here. Neither of those files is modified by this replication.
+#
+# The point of the inheritance is that a replication which restated its
+# constants could drift from the study it replicates without the diff showing
+# it. tests/test_etth2_config.py asserts the non-duplication mechanically.
+# =============================================================================
+
+meta:
+  name: "etth2-trailing-gap-replication-v1"
+  status: "frozen / preregistered — rules fixed before execution. Not yet executed."
+  preregistration: "docs/preregistration_etth2_replication_v1.md"
+  # The scientific design is inherited verbatim; only the dataset changes.
+  inherits_from:
+    - "configs/pilot_config.yaml"
+    - "configs/trailing_gap_config.yaml"
+  # What is inherited rather than restated, so it cannot drift:
+  inherited_keys:
+    - "pilot: design.context_length"       # L = 320
+    - "pilot: design.horizon"              # H = 96
+    - "pilot: design.stride"               # 96
+    - "pilot: model.*"                     # pinned revision + patch grid
+    - "pilot: statistics.bootstrap.*"      # moving-block, 4/8/12, 5000 replicates
+    - "pilot: statistics.ci_level_equivalence"          # 0.90
+    - "pilot: statistics.family_alpha"                  # 0.05
+    - "pilot: decision.no_go.equivalence_band_frac_of_clean_mae"   # SESOI, +/-3%
+    - "trailing_gap: design.gap_lengths"                # [16, 32, 64, 128]
+    - "trailing_gap: design.internal_block_distance"    # 16
+    - "trailing_gap: design.conditions_per_gap"
+    - "trailing_gap: design.expected_conditions_per_origin"  # 13
+    - "trailing_gap: truncated_long.*"
+    - "trailing_gap: contrasts"                         # R_16..R_128, B_16..B_128
+    - "trailing_gap: mechanism_rule.*"
+
+dataset:
+  name: "ETTh2"
+  target_column: "OT"
+  # Canonical ETDataset release (zhouhaoyi/ETDataset), ETT-small/ETTh2.csv —
+  # the same release the ETTh1 file came from.
+  source_url: "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh2.csv"
+  local_path: "data/raw/ETTh2.csv"
+  metadata_path: "data/raw/ETTh2_validation.json"
+  # MEASURED on 2026-09-04, not assumed. See the preregistration's factual
+  # amendment A1 and data/raw/ETTh2_validation.json.
+  expected_rows: 17420
+  expected_freq: "1h"
+  expected_sha256: "a3dc2c597b9218c7ce1cd55eb77b283fd459a1d09d753063f944967dd6b9218b"
+  # MEASURED, and a HARD STOP if it is ever non-zero at run time. ETTh1's zero
+  # native missingness is load-bearing for the target-integrity framework; this
+  # records that ETTh2 was CONFIRMED to share it, not assumed to.
+  native_missing_in_target: 0
+  native_missing_is_a_hard_stop: true
+  timestamp_first: "2016-07-01 00:00:00"
+  timestamp_last: "2018-06-26 19:00:00"
+
+design:
+  # L, H and stride are INHERITED from pilot_config.yaml and repeated here only
+  # because runner.windows.build_windows reads them off the config it is given.
+  # tests/test_etth2_config.py asserts they are EQUAL to the pilot's, so a drift
+  # fails rather than silently redefining the geometry.
+  context_length: 320        # == pilot design.context_length
+  horizon: 96                # == pilot design.horizon
+  stride: 96                 # == pilot design.stride
+  # DERIVED from ETTh2's own 17,420 rows via runner.windows.enumerate_origins,
+  # never inherited from ETTh1. That it equals ETTh1's 178 is a consequence of
+  # the two files having the same length, not an assumption.
+  # See the preregistration's factual amendment A1.
+  expected_origins: 178
+  expected_origins_derivation: "len(range(0, 17420 - 320 - 96 + 1, 96)) == 178"
+  # 1 clean + 4 gaps x 3 conditions = 13, inherited from trailing_gap_config.
+  expected_conditions_per_origin: 13
+  # 178 x 13 = 2314. Asserted at RUN time, not now.
+  expected_total_forecasts: 2314
+
+clean_control:
+  # The preregistration's resolved clean control (section 8, precondition 4).
+  # ETTh1 audited a new clean pass against a PRIOR ETTh1 run. No prior ETTh2 run
+  # exists, so the control compares TWO INDEPENDENTLY GENERATED RUNS against
+  # each other: same discipline, different reference.
+  design: "two_independent_runs"
+  reference_run_dir: "results/etth2_replication_v1/clean_reference"
+  formal_run_dir: "results/etth2_replication_v1/formal"
+  # QC ONLY. clean_reference never feeds R_g or B_g; only the formal run's own
+  # clean-only pass does. The reference exists to detect nondeterminism between
+  # independent model loads, and is not a data source.
+  reference_is_qc_only: true
+  reference_excluded_from_analysis: true
+  separate_process_required: true
+  separate_model_load_required: true
+  # Fields that must match EXACTLY between the two runs before any corrupted
+  # condition is forecast. There is no tolerance for any of them, and none may
+  # be introduced after a discrepancy is observed.
+  exact_match_fields:
+    - "row cardinality (origins x horizon)"
+    - "(origin_id, step_index) key sets"
+    - "forecast_timestamp, cell by cell"
+    - "ground_truth, cell by cell"
+    - "per-origin target_sha256"
+    - "dataset_sha256"
+    - "model_revision"
+    - "canonical float32 sha256 of the median predictions"
+  tolerance: "none"
+  on_mismatch: "HARD STOP — do not proceed, and do not select a tolerance now."
+
+replication_rule:
+  # Frozen before execution. See stats/replication_decision.py.
+  status: "frozen — outcomes fixed before any forecast was produced"
+  rule_version: "etth2-replication-v1"
+  # The PRIMARY intersection. R_128 is deliberately absent: it is a secondary
+  # stress condition, measured and reported, and never enters this decision.
+  primary_contrasts: ["R_16", "R_32", "R_64"]
+  secondary_stress_contrast: "R_128"
+  # Multiplicity, per preregistration section 5.1. Each primary component is
+  # checked against its own NOMINAL 90% equivalence CI; the intersection carries
+  # NO additional correction (an intersection-union test is conservative under
+  # any dependence). Holm across the four R gaps is retained for MATERIAL
+  # directional readings only.
+  intersection_multiplicity_correction: "none"
+  intersection_multiplicity_justification: >-
+    Intersection-union test. Under the global null at least one component
+    equivalence null is true; rejecting the global null requires rejecting every
+    component null, including that true one, so the probability of a false
+    global rejection is no greater than the size of any true component test,
+    regardless of dependence.
+  holm_applies_to: "material directional readings within the R family only"
+  b_family_correction: "separate Holm family of 4; never determines the outcome"
+  b_family_dependence_note: >-
+    R and B are separately corrected. They are NOT assumed statistically
+    independent, because they share origins and the trailing_nan arm. No sign is
+    claimed for that dependence; separate correction is a multiplicity-control
+    choice, not an independence claim.
+
+preconditions_for_execution:
+  # Documented preconditions. NOT run today.
+  native_missingness_hard_stop: true
+  reverify_model_contract: true
+  clean_reference_audit_before_any_corrupted_forecast: true
+  initialization_guard_refuses_existing_run_dir: true
+  review_note: >-
+    The Research Lead cannot recompute values that live only in an uncommitted
+    results/ directory. Summaries — not just code — must reach the reviewer, per
+    docs/results_delivery_policy.md.
